@@ -1,13 +1,6 @@
 """card_master 引擎与 Kards 规则单元测试。"""
-import os
-import sys
-
-# 允许直接从插件目录导入 engine 和 kards（不经过 __init__.py，避免 SDK 依赖）
-_PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _PLUGIN_DIR)
-
-import kards  # noqa: E402
-from engine import (  # noqa: E402
+import kards
+from engine import (
     TexasHoldemGame,
     calculate_odds,
     evaluate_hand,

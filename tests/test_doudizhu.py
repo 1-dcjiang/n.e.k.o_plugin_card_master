@@ -1,11 +1,5 @@
 """斗地主引擎单元测试。"""
-import os
-import sys
-
-_PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _PLUGIN_DIR)
-
-from doudizhu import (  # noqa: E402
+from doudizhu import (
     DouDizhuGame,
     can_play,
     identify_hand,
