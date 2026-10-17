@@ -21,6 +21,7 @@ from plugin.sdk.plugin import (
     NekoPluginBase,
     lifecycle,
     llm_tool,
+    neko_plugin,
 )
 
 from . import kards as kards_mod
@@ -68,6 +69,7 @@ GUANDAN_RULES = """## 掼蛋基本规则
 # ══════════ 插件主类 ══════════
 
 
+@neko_plugin
 class CardMasterPlugin(NekoPluginBase):
     """卡牌大师 — 让 YUI 自主学习和练习各类卡牌游戏。"""
 
