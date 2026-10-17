@@ -322,8 +322,10 @@ class TexasHoldemGame:
                    if (r["hand"]["category"], r["hand"]["tiebreaker"]) ==
                    (best["hand"]["category"], best["hand"]["tiebreaker"])]
         share = self.pot // len(winners)
-        for w in winners:
-            self.players[w["idx"]]["chips"] += share
+        remainder = self.pot - share * len(winners)
+        for i, w in enumerate(winners):
+            # 剩余筹码给第一个赢家（按位置顺序）
+            self.players[w["idx"]]["chips"] += share + (remainder if i == 0 else 0)
 
         result = {
             "stage": "showdown",

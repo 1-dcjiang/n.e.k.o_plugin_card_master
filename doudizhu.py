@@ -198,6 +198,7 @@ class DouDizhuGame:
         self.pass_count: int = 0
         self.stage: str = "dealing"  # dealing / bidding / playing / over
         self.history: list[dict] = []
+        self._bid_history: list[dict] = []  # 当前轮叫分记录（重新发牌时清空）
         self._deal()
 
     def _deal(self):
@@ -208,6 +209,7 @@ class DouDizhuGame:
         self.bottom_cards = sort_cards(deck[51:54])
         self.stage = "bidding"
         self.current = 0
+        self._bid_history = []  # 清空当前轮叫分记录
         self.history.append({"event": "deal", "bottom": hand_str(self.bottom_cards)})
 
     def bid(self, player_idx: int, score: int) -> dict:
@@ -220,6 +222,7 @@ class DouDizhuGame:
             return {"ok": False, "error": "叫分必须是 0(不叫)/1/2/3"}
 
         self.history.append({"player": self.players[player_idx]["name"], "bid": score})
+        self._bid_history.append({"player": self.players[player_idx]["name"], "bid": score})
 
         if score == 3:
             # 叫3分直接当地主
@@ -230,15 +233,14 @@ class DouDizhuGame:
         self.current = (self.current + 1) % 3
         if self.current == 0:
             # 一轮结束，看最高分
-            max_bid = max((h.get("bid", 0) for h in self.history if "bid" in h), default=0)
+            max_bid = max((h["bid"] for h in self._bid_history), default=0)
             if max_bid == 0:
                 # 都不叫，重新发牌
                 self._deal()
                 return {"ok": True, "message": "无人叫地主，重新发牌"}
-            # 找到叫最高分的人
-            for h in reversed(self.history):
-                if h.get("bid", 0) == max_bid:
-                    # 找到对应玩家索引
+            # 找到叫最高分的人（倒序找第一个叫最高分的）
+            for h in reversed(self._bid_history):
+                if h["bid"] == max_bid:
                     name = h["player"]
                     idx = next(i for i, p in enumerate(self.players) if p["name"] == name)
                     self._set_landlord(idx, max_bid)

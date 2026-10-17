@@ -160,7 +160,7 @@ class CardMasterPlugin(NekoPluginBase):
             return {"output": self._poker_rules(), "is_error": False}
         if game in ("kards",):
             return {"output": kards_mod.get_rules(topic), "is_error": False}
-        if game in ("guandan", "掼蛋", "guandan"):
+        if game in ("guandan", "掼蛋"):
             return {"output": GUANDAN_RULES, "is_error": False}
         if game in ("doudizhu", "斗地主", "ddz"):
             return {"output": DOUDIZHU_RULES, "is_error": False}
