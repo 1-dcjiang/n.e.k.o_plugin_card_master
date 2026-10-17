@@ -25,6 +25,18 @@ from plugin.sdk.plugin import (
 )
 
 from . import kards as kards_mod
+from .doudizhu import (
+    DouDizhuGame,
+)
+from .doudizhu import (
+    card_str as dd_card_str,
+)
+from .doudizhu import (
+    hand_str as dd_hand_str,
+)
+from .doudizhu import (
+    identify_hand as dd_identify,
+)
 from .engine import (
     TexasHoldemGame,
     calculate_odds,
@@ -66,6 +78,41 @@ GUANDAN_RULES = """## 掼蛋基本规则
 - 一轮中所有人都不要则该轮最大者获得下一轮出牌权
 """
 
+# ══════════ 斗地主规则 ══════════
+
+DOUDIZHU_RULES = """## 斗地主基本规则
+
+**人数**：3 人，一副牌 54 张（含大小王）。
+**目标**：地主一方 vs 两个农民一方，先出完牌的一方获胜。
+
+### 发牌与叫地主
+- 每人发 17 张，留 3 张底牌
+- 轮流叫分（1/2/3 分）或不叫，叫分最高者当地主并拿 3 张底牌（共 20 张）
+- 叫 3 分直接成为地主
+- 都不叫则重新发牌
+
+### 牌型（从大到小）
+- **王炸**：大王 + 小王（最大，可压任何牌型）
+- **炸弹**：4 张同点数（可压除王炸外任何牌型）
+- **四带二**：4 张同点 + 2 张单牌（或 2 对）
+- **飞机带翅膀**：2 组以上连续三张 + 等量单牌/对子
+- **飞机**：2 组以上连续三张（如 333+444）
+- **连对**：3 对以上连续对子（如 33+44+55）
+- **顺子**：5 张以上连续单牌（如 3-4-5-6-7）
+- **三带二**：3 张同点 + 1 对
+- **三带一**：3 张同点 + 1 张单牌
+- **三张**：3 张同点
+- **对子**：2 张同点
+- **单张**：1 张牌
+
+### 核心规则
+- **点数大小**：3 < 4 < 5 < 6 < 7 < 8 < 9 < 10 < J < Q < K < A < 2 < 小王 < 大王
+- **顺子/连对/飞机**：只能用 3-A，不能含 2 和王
+- **同牌型才能压**：除炸弹和王炸外，必须同牌型且同长度才能压，比主要点数
+- **不要**：压不过可以选择"不要"，连续两人不要则出牌权回到最后出牌者
+- **胜利**：地主先出完 → 地主胜；任一农民先出完 → 农民方胜
+"""
+
 # ══════════ 插件主类 ══════════
 
 
@@ -78,6 +125,7 @@ class CardMasterPlugin(NekoPluginBase):
         self._game: TexasHoldemGame | None = None
         self._lock = threading.Lock()
         self._game_log: list[dict] = []
+        self._dd_game: DouDizhuGame | None = None
 
     # ══════════ 生命周期 ══════════
 
@@ -114,10 +162,12 @@ class CardMasterPlugin(NekoPluginBase):
             return {"output": kards_mod.get_rules(topic), "is_error": False}
         if game in ("guandan", "掼蛋", "guandan"):
             return {"output": GUANDAN_RULES, "is_error": False}
+        if game in ("doudizhu", "斗地主", "ddz"):
+            return {"output": DOUDIZHU_RULES, "is_error": False}
         if game in ("all", "全部", ""):
-            return {"output": self._poker_rules() + "\n\n---\n\n" + kards_mod.get_rules("all") + "\n\n---\n\n" + GUANDAN_RULES,
+            return {"output": self._poker_rules() + "\n\n---\n\n" + kards_mod.get_rules("all") + "\n\n---\n\n" + GUANDAN_RULES + "\n\n---\n\n" + DOUDIZHU_RULES,
                     "is_error": False}
-        return {"output": f"未知游戏 '{game}'。支持：poker（德州扑克）/ kards / guandan（掼蛋）/ all",
+        return {"output": f"未知游戏 '{game}'。支持：poker（德州扑克）/ kards / guandan（掼蛋）/ doudizhu（斗地主）/ all",
                 "is_error": True, "error": "UNKNOWN_GAME"}
 
     def _poker_rules(self) -> str:
@@ -523,3 +573,199 @@ class CardMasterPlugin(NekoPluginBase):
             for w in result["warnings"]:
                 lines.append(f"  ⚠️ {w}")
         return {"output": "\n".join(lines), "is_error": False, "detail": result}
+
+    # ══════════ 斗地主专用工具 ══════════
+
+    @llm_tool(
+        name="doudizhu_new",
+        description="创建一局斗地主并发牌。何时用：用户说'开一局斗地主''来局斗地主'时。3人一副牌54张，每人17张+3张底牌。发牌后进入叫地主阶段，用 doudizhu_bid 叫分。参数 players：3个玩家名字（可选，默认['玩家','AI_左','AI_右']）；seed：随机种子（可选）。",
+        parameters={"type": "object", "properties": {
+            "players": {"type": "string", "description": "可选，JSON数组3个名字，如 '[\"我\",\"左\",\"右\"]'"},
+            "seed": {"type": "integer", "description": "随机种子（可选）"},
+        }},
+        timeout=30.0,
+    )
+    async def doudizhu_new(self, *, players: str = "", seed: int = 0, **_):
+        params = _.get("parameters") or {}
+        players_str = players or params.get("players", "")
+        sd = int(seed or params.get("seed", 0)) or None
+        try:
+            if players_str:
+                name_list = json.loads(players_str)
+                if len(name_list) != 3:
+                    return {"output": "斗地主必须3人，请提供3个名字。", "is_error": True, "error": "INVALID_PLAYERS"}
+            else:
+                name_list = ["玩家", "AI_左", "AI_右"]
+        except (json.JSONDecodeError, TypeError) as e:
+            return {"output": f"players 格式错误：{e}", "is_error": True, "error": "INVALID_PLAYERS"}
+
+        with self._lock:
+            self._dd_game = DouDizhuGame(name_list, seed=sd)
+        state = self._dd_game.get_state()
+        return {
+            "output": (f"新斗地主牌局已创建！玩家：{' / '.join(name_list)}\n"
+                       f"每人17张，底牌3张（叫地主后揭晓）\n"
+                       f"轮到 {state['current_player']} 叫地主，用 doudizhu_bid 叫分（0=不叫, 1/2/3=叫分）"),
+            "is_error": False,
+            "game_state": state,
+        }
+
+    @llm_tool(
+        name="doudizhu_bid",
+        description="叫地主。何时用：斗地主发牌后需要叫分时。参数 score：0=不叫, 1/2/3=叫分（叫3分直接当地主）。叫分最高者当地主并拿3张底牌。前置：需先用 doudizhu_new 创建牌局。",
+        parameters={"type": "object", "properties": {
+            "score": {"type": "integer", "description": "0=不叫, 1/2/3=叫分"},
+        }, "required": ["score"]},
+        timeout=30.0,
+    )
+    async def doudizhu_bid(self, *, score: int = 0, **_):
+        params = _.get("parameters") or {}
+        s = int(score if score != 0 else params.get("score", 0))
+        with self._lock:
+            if self._dd_game is None:
+                return {"output": "当前没有斗地主牌局，请先用 doudizhu_new 创建。", "is_error": True, "error": "NO_GAME"}
+            result = self._dd_game.bid(self._dd_game.current, s)
+        if not result.get("ok"):
+            return {"output": f"叫分失败：{result.get('error')}", "is_error": True, "error": "BID_FAILED"}
+        state = self._dd_game.get_state()
+        extra = ""
+        if self._dd_game.stage == "playing":
+            extra = f"\n\n地主 {state['landlord']} 获得底牌：{state['bottom_cards']}\n轮到地主先出牌，用 doudizhu_play 出牌（传牌的文字如 '3♠ 4♥'，空=不要）"
+        return {"output": result["message"] + extra, "is_error": False, "game_state": state}
+
+    @llm_tool(
+        name="doudizhu_play",
+        description="斗地主出牌。何时用：轮到出牌时。参数 cards：要出的牌的文字，空格分隔，如 '3♠ 4♥ 5♦ 6♣ 7♠'（顺子）；传空字符串表示'不要'。牌格式：点数+花色，点数 3-10,J,Q,K,A,2，花色 ♠♥♦♣，小王=小王，大王=大王。也可以只传点数让AI帮你选花色，如 '3 3 3 4'（三带一）。前置：需先用 doudizhu_new 创建并完成叫地主。",
+        parameters={"type": "object", "properties": {
+            "cards": {"type": "string", "description": "要出的牌，空格分隔，如 '3♠ 4♥'；空字符串=不要"},
+        }, "required": ["cards"]},
+        timeout=30.0,
+    )
+    async def doudizhu_play(self, *, cards: str = "", **_):
+        params = _.get("parameters") or {}
+        cards_str = cards if cards != "" else params.get("cards", "")
+        with self._lock:
+            if self._dd_game is None:
+                return {"output": "当前没有斗地主牌局，请先用 doudizhu_new 创建。", "is_error": True, "error": "NO_GAME"}
+            if self._dd_game.stage == "bidding":
+                return {"output": "当前是叫地主阶段，请先用 doudizhu_bid 叫分。", "is_error": True, "error": "BIDDING_STAGE"}
+            if self._dd_game.stage == "over":
+                return {"output": "牌局已结束，请用 doudizhu_new 开新一局。", "is_error": True, "error": "GAME_OVER"}
+
+            if not cards_str.strip():
+                card_list = []
+            else:
+                parse_result = self._parse_doudizhu_cards(cards_str, self._dd_game.players[self._dd_game.current]["hand"])
+                if parse_result.get("error"):
+                    return {"output": parse_result["error"], "is_error": True, "error": "INVALID_CARDS"}
+                card_list = parse_result["cards"]
+
+            result = self._dd_game.play(self._dd_game.current, card_list)
+
+        if not result.get("ok"):
+            return {"output": f"出牌失败：{result.get('error')}", "is_error": True, "error": "PLAY_FAILED"}
+
+        msg = result["message"]
+        if result.get("result"):
+            r = result["result"]
+            msg += f"\n\n游戏结束！{r['winner']}（{r['role']}）获胜！地主是 {r['landlord']}。"
+        else:
+            state = self._dd_game.get_state()
+            msg += f"\n\n轮到 {state['current_player']}（{state['current_role']}），手牌 {state['current_hand_count']} 张"
+            if state["last_play"] != "（无）":
+                msg += f"，上一手：{state['last_play']}（{state['last_player']}）"
+
+        return {"output": msg, "is_error": False, "result": result.get("result"),
+                "game_state": self._dd_game.get_state() if self._dd_game else None}
+
+    def _parse_doudizhu_cards(self, text: str, hand: list[int]) -> dict:
+        """解析用户输入的牌文字为整数列表。支持 '3♠' 格式和纯点数（自动从手中选）。"""
+        tokens = text.split()
+        cards = []
+        hand_remaining = list(hand)
+        for token in tokens:
+            matched = None
+            for c in hand_remaining:
+                if dd_card_str(c) == token:
+                    matched = c
+                    break
+            if matched is None:
+                rank_token = token.rstrip("♠♥♦♣")
+                rank_name_map = {3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9",
+                                  10: "10", 11: "J", 12: "Q", 13: "K", 14: "A", 15: "2",
+                                  16: "小王", 17: "大王"}
+                for c in hand_remaining:
+                    r = c // 4
+                    if rank_name_map.get(r, "") == rank_token:
+                        matched = c
+                        break
+            if matched is not None:
+                cards.append(matched)
+                hand_remaining.remove(matched)
+            else:
+                return {"error": f"无法识别牌 '{token}'，或手中没有这张牌。请用格式如 '3♠'、'10♥'、'J♦'、'小王'。"}
+        return {"cards": cards}
+
+    @llm_tool(
+        name="doudizhu_state",
+        description="查询当前斗地主牌局状态。何时用：需要了解当前轮到谁、各人手牌数、上一手出了什么时。前置：需先用 doudizhu_new 创建牌局。",
+        parameters={"type": "object", "properties": {}},
+        timeout=30.0,
+    )
+    async def doudizhu_state(self, **_):
+        with self._lock:
+            if self._dd_game is None:
+                return {"output": "当前没有斗地主牌局，请先用 doudizhu_new 创建。", "is_error": True, "error": "NO_GAME"}
+            state = self._dd_game.get_state()
+        lines = [f"阶段：{state['stage']}"]
+        if state["landlord"]:
+            lines.append(f"地主：{state['landlord']} | 底牌：{state['bottom_cards']}")
+        lines.append(f"当前玩家：{state['current_player']}（{state['current_role']}），手牌 {state['current_hand_count']} 张")
+        if state["current_hand"]:
+            lines.append(f"当前手牌：{state['current_hand']}")
+        if state["last_play"] != "（无）":
+            lines.append(f"上一手：{state['last_play']}（{state['last_player']}）")
+        lines.append("")
+        lines.append("玩家状态：")
+        for p in state["players"]:
+            lines.append(f"  {p['name']}（{p['role']}）：{p['card_count']} 张")
+        return {"output": "\n".join(lines), "is_error": False, "game_state": state}
+
+    @llm_tool(
+        name="doudizhu_identify",
+        description="识别一副牌的斗地主牌型。何时用：用户问'这是什么牌型''这手牌能不能出'时。参数 cards：牌的文字，空格分隔，如 '3♠ 3♥ 3♦ 4♣'。返回牌型名称（单张/对子/三张/三带一/三带二/顺子/连对/飞机/四带二/炸弹/王炸等）或'非法牌型'。",
+        parameters={"type": "object", "properties": {
+            "cards": {"type": "string", "description": "牌的文字，空格分隔，如 '3♠ 3♥ 3♦ 4♣'"},
+        }, "required": ["cards"]},
+        timeout=30.0,
+    )
+    async def doudizhu_identify(self, *, cards: str = "", **_):
+        params = _.get("parameters") or {}
+        cards_str = cards or params.get("cards", "")
+        if not cards_str.strip():
+            return {"output": "请提供要识别的牌。", "is_error": True, "error": "MISSING_CARDS"}
+        tokens = cards_str.split()
+        card_list = []
+        rank_map = {"3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10,
+                    "J": 11, "Q": 12, "K": 13, "A": 14, "2": 15}
+        suit_map = {"♠": 0, "♥": 1, "♦": 2, "♣": 3}
+        for token in tokens:
+            if token == "小王":
+                card_list.append(16 * 4)
+            elif token == "大王":
+                card_list.append(17 * 4)
+            else:
+                rank_part = token.rstrip("♠♥♦♣")
+                suit_part = token[len(rank_part):] if len(rank_part) < len(token) else "♠"
+                r = rank_map.get(rank_part)
+                s = suit_map.get(suit_part, 0)
+                if r is None:
+                    return {"output": f"无法识别牌 '{token}'。格式如 '3♠'、'10♥'、'J♦'、'小王'。",
+                            "is_error": True, "error": "INVALID_CARD"}
+                card_list.append(r * 4 + s)
+        result = dd_identify(card_list)
+        if result is None:
+            return {"output": f"{dd_hand_str(card_list)} → 非法牌型（不符合斗地主任何牌型规则）",
+                    "is_error": False, "valid": False}
+        return {"output": f"{dd_hand_str(card_list)} → {result['name']}（主要点数：{result['main_rank']}，长度：{result['length']}）",
+                "is_error": False, "valid": True, "detail": result}
