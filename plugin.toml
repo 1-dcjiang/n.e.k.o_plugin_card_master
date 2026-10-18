@@ -4,7 +4,7 @@ name = "卡牌大师"
 description = "让 YUI 自主学习和练习各类卡牌游戏（德州扑克、掼蛋、Kards 等）。提供完整牌局模拟、牌型评估、胜率计算（蒙特卡洛）、出牌建议和自我对弈训练，YUI 可以通过对话指令创建牌局、出牌、分析胜率、自我对弈来提升打牌能力。"
 short_description = "让 YUI 自主学习打牌：牌局模拟、胜率计算、出牌建议、自我对弈"
 keywords = ["扑克", "poker", "卡牌", "掼蛋", "kards", "德州扑克", "打牌", "训练", "self-play", "card game"]
-version = "0.1.0"
+version = "0.1.1"
 type = "plugin"
 entry = "plugin.plugins.card_master:CardMasterPlugin"
 
