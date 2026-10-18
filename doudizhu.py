@@ -178,6 +178,248 @@ def can_play(new_cards: list[int], last_cards: list[int] | None) -> bool:
     return False
 
 
+# ══════════ 实时出牌建议 ══════════
+
+# 牌型价值权重（用于先手时选择"损失最小"的出牌：值越小越弱，先手优先出弱牌试探）
+_TYPE_WEAKNESS = {
+    "single": 1, "pair": 2, "triple": 3, "triple_single": 4, "triple_pair": 5,
+    "straight": 6, "pair_straight": 7, "airplane": 8, "airplane_single": 9,
+    "airplane_pair": 10, "four_two": 11, "four_two_pair": 12,
+    "bomb": 100, "rocket": 200,
+}
+
+
+def _enumerate_candidates(hand: list[int]) -> list[dict]:
+    """枚举手中所有可组成的牌型候选（含每张牌的具体列表）。"""
+    ranks = [card_rank(c) for c in hand]
+    counter = Counter(ranks)
+    cands: list[dict] = []
+
+    def add(ty: str, cards: list[int], main_rank: int, length: int):
+        cands.append({"type": ty, "cards": cards, "main_rank": main_rank, "length": length})
+
+    # 王炸
+    if 16 in counter and 17 in counter:
+        add("rocket", [16 * 4, 17 * 4], 17, 2)
+
+    # 单张 / 对子 / 三张 / 炸弹（含4张）
+    for r in sorted(counter):
+        cards_r = [c for c in hand if card_rank(c) == r]
+        add("single", [cards_r[0]], r, 1)
+        if counter[r] >= 2:
+            add("pair", cards_r[:2], r, 1)
+        if counter[r] >= 3:
+            add("triple", cards_r[:3], r, 1)
+        if counter[r] >= 4:
+            add("bomb", cards_r[:4], r, 1)
+
+    # 三带一 / 三带二 / 四带二
+    triple_ranks = [r for r in counter if counter[r] >= 3]
+    for tr in triple_ranks:
+        t3 = [c for c in hand if card_rank(c) == tr][:3]
+        # 三带一（单牌不能是同一张三张的剩余，且优先不带王）
+        for r in sorted(counter):
+            if r == tr:
+                continue
+            extra = [c for c in hand if card_rank(c) == r][0]
+            add("triple_single", t3 + [extra], tr, 1)
+        # 三带二
+        for r in sorted(counter):
+            if r == tr or counter[r] < 2:
+                continue
+            pair = [c for c in hand if card_rank(c) == r][:2]
+            add("triple_pair", t3 + pair, tr, 1)
+    # 四带二（4张+2单）
+    four_ranks = [r for r in counter if counter[r] == 4]
+    for fr in four_ranks:
+        f4 = [c for c in hand if card_rank(c) == fr][:4]
+        others = [r for r in sorted(counter) if r != fr]
+        if len(others) >= 2:
+            add("four_two", f4 + [c for c in hand if card_rank(c) == others[0]][:1] +
+                [c for c in hand if card_rank(c) == others[1]][:1], fr, 1)
+
+    # 顺子（5+ 连续单牌，3-A）
+    present = [r for r in STRAIGHT_RANKS if counter.get(r, 0) >= 1]
+    for start in present:
+        for length in range(5, 13):
+            seq = list(range(start, start + length))
+            if seq[-1] > 14 or not all(r in present for r in seq):
+                break
+            cards = []
+            for r in seq:
+                cards.append(next(c for c in hand if card_rank(c) == r and c not in cards))
+            add("straight", cards, start, length)
+
+    # 连对（3+ 对，3-A）
+    pairs_present = [r for r in STRAIGHT_RANKS if counter.get(r, 0) >= 2]
+    for start in pairs_present:
+        for length in range(3, 11):
+            seq = list(range(start, start + length))
+            if seq[-1] > 14 or not all(r in pairs_present for r in seq):
+                break
+            cards = []
+            for r in seq:
+                cards.extend([c for c in hand if card_rank(c) == r][:2])
+            add("pair_straight", cards, start, length)
+
+    # 飞机（2+ 组连续三张，3-A），含带单/带对
+    triples_present = [r for r in STRAIGHT_RANKS if counter.get(r, 0) >= 3]
+    for start in triples_present:
+        for length in range(2, 9):
+            seq = list(range(start, start + length))
+            if seq[-1] > 14 or not all(r in triples_present for r in seq):
+                break
+            base = []
+            for r in seq:
+                base.extend([c for c in hand if card_rank(c) == r][:3])
+            t_count = length
+            # 纯飞机
+            add("airplane", list(base), start, t_count)
+            # 飞机带单牌：需要 t_count 张不同的单牌（排除三张组本身）
+            extra_singles = []
+            for r in sorted(counter):
+                if r in seq:
+                    continue
+                extra_singles.extend([c for c in hand if card_rank(c) == r])
+                if len(extra_singles) >= t_count:
+                    break
+            if len(extra_singles) >= t_count:
+                add("airplane_single", base + extra_singles[:t_count], start, t_count)
+            # 飞机带对子：需要 t_count 对
+            extra_pairs = []
+            for r in sorted(counter):
+                if r in seq:
+                    continue
+                if counter[r] >= 2:
+                    extra_pairs.extend([c for c in hand if card_rank(c) == r][:2])
+                    if len(extra_pairs) >= t_count * 2:
+                        break
+            if len(extra_pairs) >= t_count * 2:
+                add("airplane_pair", base + extra_pairs[:t_count * 2], start, t_count)
+
+    return cands
+
+
+def _dedup_candidates(cands: list[dict]) -> list[dict]:
+    """按（type, 排序后的牌集合）去重，防止同一组合被多次枚举。"""
+    seen = set()
+    out = []
+    for c in cands:
+        key = (c["type"], tuple(sorted(c["cards"])))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
+
+
+def suggest_play(hand: list[int], last_play: list[int] | None,
+                 role: str = "farmer", top_k: int = 8) -> dict:
+    """实时出牌建议：枚举手中全部可出候选，按策略排序，给出推荐。
+
+    hand: 当前手牌（整数列表）；last_play: 上一手出的牌（None/空=先手）；
+    role: 'landlord'（地主）/ 'farmer'（农民）/ ''（未知）。
+    返回 {candidates, suggestion, should_pass, reason}。
+    策略要点：
+    - 先手：优先出最弱牌型（单张<对子<三张…）试探，保留炸弹/王炸；
+      手牌整齐时优先出长顺子/连对减少张数。
+    - 压牌：用最小点数能压的组合；压不动时建议过牌；身份为农民且
+      队友刚出牌时优先过牌配合。
+    - 炸弹/王炸只在关键局面使用（最后一手/必须抢出牌权/对方快走完）。
+    """
+    if not hand:
+        return {"candidates": [], "suggestion": None, "should_pass": False,
+                "reason": "手中无牌（已出完）。"}
+    cands = _dedup_candidates(_enumerate_candidates(hand))
+
+    # 过滤：能压过上一手
+    playable = []
+    if last_play:
+        for c in cands:
+            if can_play(c["cards"], last_play):
+                playable.append(c)
+    else:
+        playable = cands
+
+    if not playable:
+        if last_play:
+            last_info = identify_hand(last_play)
+            last_name = HAND_TYPE_NAMES.get((last_info or {}).get("type", ""), "未知牌型")
+            return {
+                "candidates": [], "suggestion": None, "should_pass": True,
+                "reason": f"手中没有能压过上一手（{last_name}）的牌，建议'不要'。",
+            }
+        return {
+            "candidates": [], "suggestion": None, "should_pass": True,
+            "reason": "手中没有可组成的合法牌型。",
+        }
+
+    # 排序：炸弹/王炸最后考虑；其余按"弱牌型优先、小点数优先"
+    def sort_key(c: dict) -> tuple:
+        ty = c["type"]
+        if ty in ("bomb", "rocket"):
+            return (10, c["main_rank"])
+        return (_TYPE_WEAKNESS.get(ty, 50), c["main_rank"])
+
+    ranked = sorted(playable, key=sort_key)
+
+    # 选择推荐
+    suggestion = None
+    should_pass = False
+    reason = ""
+    if last_play:
+        last_info = identify_hand(last_play)
+        if last_info and last_info["type"] in ("bomb", "rocket"):
+            if ranked[0]["type"] not in ("bomb", "rocket"):
+                should_pass = True
+                reason = "上一手是炸弹/王炸，除非有更大炸弹否则建议'不要'。"
+            else:
+                suggestion = ranked[0]
+                if suggestion["type"] == "rocket":
+                    reason = "用更大的王炸压制。"
+                else:
+                    reason = f"用更大的炸弹（{suggestion['main_rank']}）压制。"
+        else:
+            suggestion = ranked[0]
+            if role == "farmer" and len(hand) > 6:
+                reason = (f"农民身份且牌较多，用最小的{HAND_TYPE_NAMES.get(ranked[0]['type'], ranked[0]['type'])}"
+                          f"（{hand_str(ranked[0]['cards'])}）压制，保留大牌。")
+            else:
+                reason = f"用{HAND_TYPE_NAMES.get(ranked[0]['type'], ranked[0]['type'])}（{hand_str(ranked[0]['cards'])}）压制上一手。"
+    else:
+        # 先手
+        non_bomb = [c for c in ranked if c["type"] not in ("bomb", "rocket")]
+        if non_bomb:
+            suggestion = non_bomb[0]
+            reason = (f"先手出最弱的{HAND_TYPE_NAMES.get(non_bomb[0]['type'], non_bomb[0]['type'])}"
+                      f"（{hand_str(non_bomb[0]['cards'])}）试探，保留炸弹/王炸。")
+        else:
+            suggestion = ranked[0]
+            reason = f"手中只剩炸弹/王炸，直接打出：{hand_str(ranked[0]['cards'])}。"
+
+    # 组装候选输出（最多 top_k 个）
+    candidates_out = []
+    for c in ranked[:top_k]:
+        candidates_out.append({
+            "cards": hand_str(c["cards"]),
+            "type": c["type"],
+            "type_name": HAND_TYPE_NAMES.get(c["type"], c["type"]),
+            "main_rank": c["main_rank"],
+            "length": c["length"],
+        })
+
+    return {
+        "candidates": candidates_out,
+        "suggestion": {
+            "cards": hand_str(suggestion["cards"]) if suggestion else None,
+            "type": suggestion["type"] if suggestion else None,
+            "type_name": HAND_TYPE_NAMES.get(suggestion["type"], suggestion["type"]) if suggestion else None,
+        } if suggestion else None,
+        "should_pass": should_pass,
+        "reason": reason,
+    }
+
+
 # ══════════ 牌局状态机 ══════════
 
 class DouDizhuGame:

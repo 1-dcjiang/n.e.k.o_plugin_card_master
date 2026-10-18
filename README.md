@@ -37,6 +37,18 @@
 - **牌型识别工具**：输入任意牌组合，自动识别是什么牌型
 - **支持纯点数出牌**：输入"3 3 3 4"即可，AI自动从手中选对应花色
 
+### 🎮 实时打牌（live 模式）——YUI 自己打牌
+> 让 YUI 在获得电脑鼠标/键盘控制权后，**自己操作真实游戏**打牌。
+
+- **live_session**：开启实时打牌会话（德州扑克 / 斗地主 / Kards 三选一）
+- **live_report**：YUI 从屏幕读取局面（截图/OCR/读界面）→ 结构化上报 → 插件返回**决策建议 + 鼠标操作步骤**
+- **live_action_done**：确认动作已执行（成功/失败），失败时给补救指引
+- **live_status**：查看会话回合数、动作历史、最近局面
+- **doudizhu_live_advice**：斗地主独立出牌建议（完整候选枚举 + 身份策略 + 炸弹/王炸保留）
+- **kards_live_advice**：Kards 独立回合建议（按优先级：攻击→部署→命令卡，附检查清单，规则全部来自官方 wiki）
+
+**工作流程**：YUI 获得鼠标控制权 → `live_session` 开会话 → 截图读局面 → `live_report` 上报 → 按插件给的 steps 点鼠标 → `live_action_done` 确认 → 等对手行动 → 重新上报，如此循环。
+
 ---
 
 ## 📥 安装方法
@@ -109,6 +121,16 @@ https://market.project-neko.cn/#/plugin/XXX
 | `doudizhu_state` | 查询当前牌局状态 |
 | `doudizhu_identify` | 识别任意牌组合的牌型 |
 
+### 实时打牌（live 模式）
+| 工具 | 作用 |
+|---|---|
+| `live_session` | 开启实时打牌会话（poker/doudizhu/kards） |
+| `live_report` | 上报屏幕局面，返回决策建议 + 鼠标操作步骤 |
+| `live_action_done` | 确认动作已执行，推进会话 |
+| `live_status` | 查看会话状态与动作历史 |
+| `doudizhu_live_advice` | 斗地主独立出牌建议（候选枚举+身份策略） |
+| `kards_live_advice` | Kards 独立回合建议（攻击/部署/命令卡优先级） |
+
 ---
 
 ## 🔒 安全与设计
@@ -124,6 +146,8 @@ https://market.project-neko.cn/#/plugin/XXX
 
 | 版本 | 要点 |
 |---|---|
+| **v0.2.0** | 新增实时打牌（live）模式：live_session/live_report/live_action_done/live_status 会话工具 + doudizhu_live_advice（完整候选枚举+身份策略）+ kards_live_advice（优先级回合建议）；engine 提取 suggest_from_state 纯函数供 live 复用；21 个新测试 |
+| **v0.1.1** | 修复 v0.1.0 发布包哈希不一致导致的下载失败 |
 | **v0.1.0** | 首个版本。德州扑克完整牌局模拟（发牌/下注/摊牌/自我对弈）、牌型评估、蒙特卡洛胜率、出牌建议；斗地主完整牌局（发牌/叫地主/14种牌型识别/出牌验证/胜负判定）；Kards 真实规则查询（官方 wiki 数据）、20+能力关键词、9国特色、卡组检查；掼蛋规则查询 |
 
 ---
@@ -137,8 +161,10 @@ https://github.com/1-dcjiang/n.e.k.o_plugin_card_master
 ```
 
 结构：
-- `__init__.py` — 插件主类 + 13 个 LLM 工具
-- `engine.py` — 德州扑克引擎（牌组/牌型评估/牌局状态机/胜率/自我对弈）
+- `__init__.py` — 插件主类 + 23 个 LLM 工具
+- `engine.py` — 德州扑克引擎（牌组/牌型评估/牌局状态机/胜率/自我对弈/suggest_from_state 纯函数）
 - `kards.py` — Kards 规则数据（官方 wiki）+ 查询函数 + 卡组检查
+- `doudizhu.py` — 斗地主引擎（牌型识别/状态机/suggest_play 实时出牌建议）
+- `live.py` — 实时打牌决策引擎（会话管理 + 三种游戏决策器 + 鼠标操作指引）
 
 许可证：Apache 2.0

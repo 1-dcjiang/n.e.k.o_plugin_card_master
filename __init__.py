@@ -25,6 +25,7 @@ from plugin.sdk.plugin import (
 )
 
 from . import kards as kards_mod
+from . import live as live_mod
 from .doudizhu import (
     DouDizhuGame,
 )
@@ -36,6 +37,9 @@ from .doudizhu import (
 )
 from .doudizhu import (
     identify_hand as dd_identify,
+)
+from .doudizhu import (
+    suggest_play as dd_suggest_play,
 )
 from .engine import (
     TexasHoldemGame,
@@ -126,6 +130,7 @@ class CardMasterPlugin(NekoPluginBase):
         self._lock = threading.Lock()
         self._game_log: list[dict] = []
         self._dd_game: DouDizhuGame | None = None
+        self._live_sessions: dict[str, live_mod.LiveSession] = {}
 
     # ══════════ 生命周期 ══════════
 
@@ -769,3 +774,306 @@ class CardMasterPlugin(NekoPluginBase):
                     "is_error": False, "valid": False}
         return {"output": f"{dd_hand_str(card_list)} → {result['name']}（主要点数：{result['main_rank']}，长度：{result['length']}）",
                 "is_error": False, "valid": True, "detail": result}
+
+    # ══════════ live 模式：实时打牌决策（YUI 控制电脑鼠标自己打牌） ══════════
+
+    @llm_tool(
+        name="live_session",
+        description="开启一次实时打牌会话。何时用：YUI 获得电脑控制权、在真实游戏（德州扑克/斗地主/Kards）窗口中准备自己打牌时，第一步必须先调用本工具创建会话。参数 game：poker（德州扑克）/ doudizhu（斗地主）/ kards；role：玩家身份（如 '1号位'/'地主'/'农民'/'德国'）；params：JSON 对象，游戏参数（poker: {small_blind,big_blind,my_chips}；doudizhu: {my_role}；kards: {main_nation,ally_nation}）。返回 session_id，后续 live_report / live_action_done 都需带上。",
+        parameters={"type": "object", "properties": {
+            "game": {"type": "string", "description": "poker / doudizhu / kards"},
+            "role": {"type": "string", "description": "玩家身份描述"},
+            "params": {"type": "string", "description": "可选 JSON 对象，游戏参数"},
+        }, "required": ["game"]},
+        timeout=30.0,
+    )
+    async def live_session(self, *, game: str = "", role: str = "", params: str = "", **_):
+        prm = _.get("parameters") or {}
+        g = (game or prm.get("game", "")).lower().strip()
+        r = role or prm.get("role", "")
+        p_str = params or prm.get("params", "")
+        p_obj = {}
+        if p_str:
+            try:
+                p_obj = json.loads(p_str)
+                if not isinstance(p_obj, dict):
+                    raise ValueError("params 必须是 JSON 对象")
+            except (json.JSONDecodeError, ValueError) as e:
+                return {"output": f"params 格式错误：{e}。应为 JSON 对象，如 '{{\"small_blind\":10}}'",
+                        "is_error": True, "error": "INVALID_PARAMS"}
+
+        if g not in ("poker", "德州扑克", "texas"):
+            if g in ("德州扑克", "texas"):
+                g = "poker"
+        if g not in ("poker", "doudizhu", "斗地主", "kards"):
+            return {"output": f"未知游戏 '{g}'。支持：poker（德州扑克）/ doudizhu（斗地主）/ kards。",
+                    "is_error": True, "error": "UNKNOWN_GAME"}
+        if g in ("德州扑克",):
+            g = "poker"
+        if g == "斗地主":
+            g = "doudizhu"
+
+        with self._lock:
+            session = live_mod.new_session(g, r, p_obj)
+            self._live_sessions[session.session_id] = session
+
+        usage = {
+            "poker": "流程：live_report 上报局面（hole_cards/community/pot/to_call/my_chips/active_players/big_blind/current_bet）→ 插件给动作建议+点击步骤 → live_action_done 确认 → 重复。",
+            "doudizhu": "流程：live_report 上报局面（my_hand/last_play/my_role）→ 插件给候选出牌+推荐 → live_action_done 确认 → 重复。",
+            "kards": "流程：live_report 上报局面（kredits/my_hq/opp_hq/my_hand/front_line/support_line/opp_front/opp_support/is_my_turn）→ 插件给按优先级的行动建议+点击步骤 → live_action_done 确认 → 重复。",
+        }[g]
+        return {
+            "output": f"实时打牌会话已开启！\n游戏：{g} | 身份：{r or '未指定'}\nsession_id：{session.session_id}\n\n{usage}\n\n注意：先截图确认你在游戏窗口中的当前局面，把读到的状态填入 live_report 的 state JSON。",
+            "is_error": False,
+            "session_id": session.session_id,
+        }
+
+    @llm_tool(
+        name="live_report",
+        description="上报实时牌局局面并获得打牌建议。何时用：YUI 获得电脑控制权后，从真实游戏屏幕读取当前局面（自己的手牌、公共牌、底池、对方行动等），把状态结构化后调用本工具，插件返回该怎么做+鼠标操作步骤。参数 session_id：live_session 返回的会话 ID；state：JSON 对象，游戏相关字段见 live_session 的说明。每次对手/自己行动后都要重新截图上报。",
+        parameters={"type": "object", "properties": {
+            "session_id": {"type": "string", "description": "live_session 返回的会话 ID"},
+            "state": {"type": "string", "description": "局面 JSON 对象，如 poker: '{\"hole_cards\":\"As Kh\",\"community\":\"Td Js Qh\",\"pot\":120,\"to_call\":40,\"my_chips\":980,\"active_players\":4}'"},
+        }, "required": ["session_id", "state"]},
+        timeout=120.0,
+    )
+    async def live_report(self, *, session_id: str = "", state: str = "", **_):
+        prm = _.get("parameters") or {}
+        sid = session_id or prm.get("session_id", "")
+        state_str = state or prm.get("state", "")
+        if not sid:
+            return {"output": "缺少 session_id。请先用 live_session 创建会话。",
+                    "is_error": True, "error": "MISSING_SESSION"}
+        if not state_str:
+            return {"output": "缺少 state（局面 JSON）。请从屏幕上读取局面后填入。",
+                    "is_error": True, "error": "MISSING_STATE"}
+        try:
+            state_obj = json.loads(state_str)
+            if not isinstance(state_obj, dict):
+                raise ValueError("state 必须是 JSON 对象")
+        except (json.JSONDecodeError, ValueError) as e:
+            return {"output": f"state 格式错误：{e}。应为 JSON 对象。",
+                    "is_error": True, "error": "INVALID_STATE"}
+
+        with self._lock:
+            session = self._live_sessions.get(sid)
+            if session is None:
+                return {"output": f"会话 {sid} 不存在或已过期。请用 live_session 重新创建。",
+                        "is_error": True, "error": "SESSION_NOT_FOUND"}
+            result = live_mod.handle_report(session, state_obj)
+
+        if not result.get("ok"):
+            return {"output": f"无法给出建议：{result.get('error')}\n下一步：{result.get('action')}",
+                    "is_error": True, "error": "ADVICE_FAILED"}
+
+        advice = result.get("advice")
+        output_lines: list[str] = []
+        if advice:
+            action_map = {"fold": "弃牌", "check": "过牌", "call": "跟注", "raise": "加注"}
+            cn = action_map.get(advice["suggestion"], advice["suggestion"])
+            output_lines.append(
+                f"建议：{cn}"
+                + (f"（加注到 {advice['raise_to']}）" if advice.get("raise_to") else "")
+                + f"\n理由：{advice['reason']}"
+                + f"\n胜率 {advice['win_rate']}% | 底池赔率 {advice['pot_odds']}%"
+            )
+            steps = advice.get("steps") or []
+        elif result.get("suggestion"):
+            output_lines.append(result.get("output") or "")
+            steps = (result["suggestion"].get("steps") or [])
+        else:
+            output_lines.append(result.get("output") or "")
+            steps = []
+            for a in result.get("actions") or []:
+                steps.extend(a.get("steps") or [])
+            if result.get("checklist"):
+                output_lines.append("⚠️ 检查清单：")
+                for c in result["checklist"]:
+                    output_lines.append(f"  • {c}")
+
+        if steps:
+            output_lines.append("操作步骤：")
+            for i, s in enumerate(steps, 1):
+                output_lines.append(f"  {i}. {s['what']}（验证：{s['verify']}）")
+
+        return {"output": "\n".join(output_lines), "is_error": False,
+                "session_id": sid, "advice": advice or result.get("suggestion")}
+
+    @llm_tool(
+        name="live_action_done",
+        description="确认已执行建议动作。何时用：YUI 按 live_report 的建议在真实游戏中完成鼠标/键盘操作后，调用本工具确认，插件记录动作并给出下一步指引。参数 session_id：会话 ID；action：执行的动作描述；result：可选，执行结果（如 '已弃牌'/'出牌成功'/'按钮未找到'）。若执行失败（按钮找不到、点错），如实填写 result，插件会给出补救指引。",
+        parameters={"type": "object", "properties": {
+            "session_id": {"type": "string", "description": "live_session 返回的会话 ID"},
+            "action": {"type": "string", "description": "执行的动作描述"},
+            "result": {"type": "string", "description": "可选，执行结果"},
+        }, "required": ["session_id", "action"]},
+        timeout=30.0,
+    )
+    async def live_action_done(self, *, session_id: str = "", action: str = "", result: str = "", **_):
+        prm = _.get("parameters") or {}
+        sid = session_id or prm.get("session_id", "")
+        act = action or prm.get("action", "")
+        res = result or prm.get("result", "")
+        if not sid:
+            return {"output": "缺少 session_id。", "is_error": True, "error": "MISSING_SESSION"}
+        if not act:
+            return {"output": "缺少 action（执行的动作描述）。", "is_error": True, "error": "MISSING_ACTION"}
+
+        with self._lock:
+            session = self._live_sessions.get(sid)
+            if session is None:
+                return {"output": f"会话 {sid} 不存在或已过期。请用 live_session 重新创建。",
+                        "is_error": True, "error": "SESSION_NOT_FOUND"}
+            session.record("action_done", {"action": act, "result": res})
+
+        failed = any(k in res for k in ("未找到", "失败", "找不到", "点错", "没反应", "error", "Error"))
+        if failed:
+            return {
+                "output": "动作执行失败。补救指引：\n1. 先截图确认当前游戏界面（按钮布局可能变化/弹窗遮挡）\n2. 重新调用 live_report 上报最新局面\n3. 插件会基于新局面重新给建议。\n\n同时检查：游戏窗口是否在前台？是否处于你的回合？",
+                "is_error": False,
+            }
+        return {
+            "output": f"已记录动作：{act}\n下一步：等待对手行动或轮到你后，重新截图并调用 live_report 上报新局面，获取下一步建议。",
+            "is_error": False,
+        }
+
+    @llm_tool(
+        name="live_status",
+        description="查看实时打牌会话状态与动作历史。何时用：需要确认当前会话的回合数、已执行动作、最近一次局面时。参数 session_id：会话 ID。",
+        parameters={"type": "object", "properties": {
+            "session_id": {"type": "string", "description": "live_session 返回的会话 ID"},
+        }, "required": ["session_id"]},
+        timeout=30.0,
+    )
+    async def live_status(self, *, session_id: str = "", **_):
+        prm = _.get("parameters") or {}
+        sid = session_id or prm.get("session_id", "")
+        if not sid:
+            return {"output": "缺少 session_id。", "is_error": True, "error": "MISSING_SESSION"}
+        with self._lock:
+            session = self._live_sessions.get(sid)
+            if session is None:
+                return {"output": f"会话 {sid} 不存在或已过期。", "is_error": True, "error": "SESSION_NOT_FOUND"}
+            history = list(session.history)
+            state_keys = list(session.state.keys())
+        lines = [
+            f"会话 {sid} | 游戏：{session.game_type} | 身份：{session.role or '未指定'}",
+            f"回合数：{session.turn_counter} | 最近局面字段：{', '.join(state_keys) or '（未上报）'}",
+            "",
+            "动作历史：",
+        ]
+        if not history:
+            lines.append("  （暂无记录）")
+        for h in history[-15:]:
+            lines.append(f"  [{h['t']}] {h['event']}：{h['detail']}")
+        return {"output": "\n".join(lines), "is_error": False}
+
+    @llm_tool(
+        name="doudizhu_live_advice",
+        description="斗地主实时出牌建议（独立工具，不依赖会话）。何时用：YUI 在斗地主真实窗口中轮到出牌，把读到的局面传入即可获得候选出牌和推荐。参数 my_hand：你的手牌文字，空格分隔，如 '3♠ 5♥ 5♦ 9♣ 9♠ J♥ J♣ 2♣ 大王'；last_play：上一手出的牌（空字符串=你是先手）；my_role：landlord（地主）/ farmer（农民）/ 不填自动按农民。返回所有可出候选（按推荐度排序）+ 推荐 + 是否建议'不要'。",
+        parameters={"type": "object", "properties": {
+            "my_hand": {"type": "string", "description": "手牌文字，如 '3♠ 5♥ 5♦ 9♣ 9♠ J♥'"},
+            "last_play": {"type": "string", "description": "上一手出的牌，空=先手"},
+            "my_role": {"type": "string", "description": "landlord/farmer"},
+        }, "required": ["my_hand"]},
+        timeout=30.0,
+    )
+    async def doudizhu_live_advice(self, *, my_hand: str = "", last_play: str = "",
+                                   my_role: str = "", **_):
+        prm = _.get("parameters") or {}
+        hand_txt = my_hand or prm.get("my_hand", "")
+        last_txt = last_play or prm.get("last_play", "")
+        role = (my_role or prm.get("my_role", "farmer")).lower()
+        role_norm = "landlord" if role in ("landlord", "地主") else "farmer"
+        if not hand_txt.strip():
+            return {"output": "请提供 my_hand（你的手牌）。", "is_error": True, "error": "MISSING_HAND"}
+
+        from .live import _parse_dd_token
+        hand_cards = []
+        for token in hand_txt.split():
+            m = _parse_dd_token(token)
+            if m is None:
+                return {"output": f"无法识别手牌中的 '{token}'。格式：3♠ 10♥ J♦ A♣ 2 小王 大王",
+                        "is_error": True, "error": "INVALID_CARD"}
+            hand_cards.append(m)
+        last_cards = []
+        if last_txt.strip() and last_txt not in ("（无）", "无", "-"):
+            for token in last_txt.split():
+                m = _parse_dd_token(token)
+                if m is None:
+                    return {"output": f"无法识别上一手牌中的 '{token}'。",
+                            "is_error": True, "error": "INVALID_CARD"}
+                last_cards.append(m)
+
+        sug = dd_suggest_play(hand_cards, last_cards if last_cards else None, role=role_norm)
+        lines = [f"建议：{sug['reason']}"]
+        if sug.get("suggestion"):
+            lines.append(f"要出的牌：{sug['suggestion']['cards']}（{sug['suggestion']['type_name']}）")
+        if sug.get("should_pass"):
+            lines.append("这一手建议'不要'。")
+        if sug.get("candidates"):
+            lines.append("")
+            lines.append("可出候选（按推荐度排序）：")
+            for i, c in enumerate(sug["candidates"][:6], 1):
+                lines.append(f"  {i}. {c['cards']}（{c['type_name']}）")
+        return {"output": "\n".join(lines), "is_error": False, "detail": sug}
+
+    @llm_tool(
+        name="kards_live_advice",
+        description="Kards 实时回合建议（独立工具，不依赖会话）。何时用：YUI 在 Kards 真实窗口中轮到自己的回合，把从屏幕读到的局面传入，插件基于官方 wiki 真实规则给出按优先级的行动建议（攻击/部署/命令卡）+ 操作步骤 + 检查清单。参数 kredits：当前指挥点；my_hq/opp_hq：双方总部防御；my_hand：手牌 JSON 数组 [{name,cost,type,attack,defense,keywords}]；front_line/support_line：己方前线/支援线单位数组；opp_front/opp_support：敌方单位数组；is_my_turn：是否你的回合。注意：本建议是规则级启发式，YUI 需结合卡面实际数值判断。",
+        parameters={"type": "object", "properties": {
+            "kredits": {"type": "integer", "description": "当前指挥点"},
+            "my_hq": {"type": "integer", "description": "己方总部防御，默认20"},
+            "opp_hq": {"type": "integer", "description": "敌方总部防御，默认20"},
+            "my_hand": {"type": "string", "description": "手牌 JSON 数组"},
+            "front_line": {"type": "string", "description": "己方前线单位 JSON 数组"},
+            "support_line": {"type": "string", "description": "己方支援线单位 JSON 数组"},
+            "opp_front": {"type": "string", "description": "敌方前线单位 JSON 数组"},
+            "opp_support": {"type": "string", "description": "敌方支援线单位 JSON 数组"},
+            "is_my_turn": {"type": "boolean", "description": "是否我的回合，默认true"},
+        }, "required": ["kredits"]},
+        timeout=30.0,
+    )
+    async def kards_live_advice(self, *, kredits: int = 0, my_hq: int = 20, opp_hq: int = 20,
+                                my_hand: str = "", front_line: str = "", support_line: str = "",
+                                opp_front: str = "", opp_support: str = "",
+                                is_my_turn: bool = True, **_):
+        prm = _.get("parameters") or {}
+        try:
+            k = int(kredits if kredits != 0 else prm.get("kredits", 0))
+        except (TypeError, ValueError):
+            k = int(prm.get("kredits", 0) or 0)
+        mh = int(my_hq or prm.get("my_hq", 20))
+        oh = int(opp_hq or prm.get("opp_hq", 20))
+        turn = bool(is_my_turn if is_my_turn is not None else prm.get("is_my_turn", True))
+
+        def _parse_list(s: str, field: str):
+            if not s:
+                return []
+            try:
+                v = json.loads(s)
+                if not isinstance(v, list):
+                    raise ValueError(f"{field} 必须是 JSON 数组")
+                return v
+            except (json.JSONDecodeError, ValueError) as e:
+                return {"__error__": str(e)}
+
+        state = {
+            "kredits": k, "my_hq": mh, "opp_hq": oh, "is_my_turn": turn,
+            "my_hand": _parse_list(my_hand or prm.get("my_hand", ""), "my_hand"),
+            "front_line": _parse_list(front_line or prm.get("front_line", ""), "front_line"),
+            "support_line": _parse_list(support_line or prm.get("support_line", ""), "support_line"),
+            "opp_front": _parse_list(opp_front or prm.get("opp_front", ""), "opp_front"),
+            "opp_support": _parse_list(opp_support or prm.get("opp_support", ""), "opp_support"),
+        }
+        for field in ("my_hand", "front_line", "support_line", "opp_front", "opp_support"):
+            if isinstance(state[field], dict) and "__error__" in state[field]:
+                return {"output": f"{field} 格式错误：{state[field]['__error__']}。应为 JSON 数组。",
+                        "is_error": True, "error": "INVALID_JSON"}
+
+        result = live_mod.advise_kards(state)
+        if not result.get("ok"):
+            return {"output": f"无法给出建议：{result.get('error')}\n下一步：{result.get('action')}",
+                    "is_error": True, "error": "ADVICE_FAILED"}
+        return {"output": result.get("output", ""), "is_error": False, "detail": result}
+

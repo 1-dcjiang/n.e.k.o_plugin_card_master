@@ -548,17 +548,19 @@ def calculate_odds(hand: list[int], community: list[int], opponents: int = 1,
 # ══════════ 出牌建议 ══════════
 
 
-def suggest_action(game: TexasHoldemGame, simulations: int = 1500) -> dict:
-    """基于当前牌局给出出牌建议（胜率 + 底池赔率 + 位置）。"""
-    state = game.get_state()
-    p = game.players[game.current]
-    hand = p["hand"]
-    community = game.community
-    to_call = state["to_call"]
-    pot = state["pot"]
+def suggest_from_state(hand: list[int], community: list[int], to_call: int, pot: int,
+                       chips: int, active_count: int, big_blind: int,
+                       current_bet: int = 0, simulations: int = 1500) -> dict:
+    """从外部局面状态直接给出出牌建议（不依赖 game 对象）。
 
+    供实时打牌（live）模式复用：YUI 从屏幕上读取局面后传入，返回与
+    suggest_action 相同的决策结构。参数：
+    hand: 你的2张手牌；community: 公共牌（0-5张）；to_call: 当前需跟注额；
+    pot: 底池；chips: 你的筹码；active_count: 仍在局中的玩家人数；
+    big_blind: 大盲注；current_bet: 当前轮最大下注（live 模式下可不传）。
+    """
     # 计算胜率
-    odds = calculate_odds(hand, community, opponents=max(1, state["active_count"] - 1),
+    odds = calculate_odds(hand, community, opponents=max(1, active_count - 1),
                           simulations=simulations)
     win_rate = odds["win_rate"]
     tie_rate = odds["tie_rate"]
@@ -577,7 +579,7 @@ def suggest_action(game: TexasHoldemGame, simulations: int = 1500) -> dict:
         if equity > 60:
             suggestion = "raise"
             reason = f"胜率 {win_rate}% 很高，主动加注建立底池"
-            raise_amount = min(p["chips"], max(game.big_blind * 3, int(pot * 0.6)))
+            raise_amount = min(chips, max(big_blind * 3, int(pot * 0.6)))
         elif equity > 40:
             suggestion = "check"
             reason = f"胜率 {win_rate}% 中等，check 看翻牌，控制底池"
@@ -590,7 +592,7 @@ def suggest_action(game: TexasHoldemGame, simulations: int = 1500) -> dict:
         if equity > pot_odds + 15:
             suggestion = "raise"
             reason = f"胜率 {win_rate}% 远超底池赔率 {pot_odds:.1f}%，加注获取价值"
-            raise_amount = min(p["chips"], max(to_call * 2 + game.current_bet, int(pot * 0.75)))
+            raise_amount = min(chips, max(to_call * 2 + current_bet, int(pot * 0.75)))
         elif equity > pot_odds:
             suggestion = "call"
             reason = f"胜率 {win_rate}% 略高于底池赔率 {pot_odds:.1f}%，跟注合理"
@@ -617,8 +619,20 @@ def suggest_action(game: TexasHoldemGame, simulations: int = 1500) -> dict:
         "community": hand_str(community) if community else "（无）",
         "pot": pot,
         "to_call": to_call,
-        "chips": p["chips"],
+        "chips": chips,
     }
+
+
+def suggest_action(game: TexasHoldemGame, simulations: int = 1500) -> dict:
+    """基于当前牌局给出出牌建议（胜率 + 底池赔率 + 位置）。"""
+    state = game.get_state()
+    p = game.players[game.current]
+    return suggest_from_state(
+        list(p["hand"]), list(game.community),
+        state["to_call"], state["pot"], p["chips"],
+        state["active_count"], game.big_blind,
+        current_bet=game.current_bet, simulations=simulations,
+    )
 
 
 # ══════════ 自我对弈 ══════════
