@@ -63,7 +63,7 @@ async function postWithCsrfRetry(url, body) {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function callPlugin(entry, args = {}) {
+async function callPlugin(entry, args = {}, tolerateErrors = []) {
   const resp = await postWithCsrfRetry(RUNS_URL, JSON.stringify({ plugin_id: pluginId, entry_id: entry, args }));
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const { run_id, id } = await resp.json();
@@ -98,6 +98,7 @@ async function callPlugin(entry, args = {}) {
         raw = raw.data;
       }
       if (raw && raw.error) {
+        if (tolerateErrors.includes(String(raw.error))) return raw;
         throw new Error(String(raw.error) === 'NO_GAME' ? '还没有牌局，请先点「再来一局」' : (raw.output || '插件调用失败'));
       }
       return raw;
@@ -254,7 +255,7 @@ async function runAction(entry, args = {}, showOutput = true) {
     if (showOutput && raw && raw.output) toast(raw.output);
   } catch (e) {
     toast(e.message || '操作失败');
-    try { const s = await callPlugin('dd_ui_state'); if (s && s.state) renderState(s.state); } catch (e2) { /* ignore */ }
+    try { const s = await callPlugin('dd_ui_state', {}, ['NO_GAME']); if (s && s.state) renderState(s.state); } catch (e2) { /* ignore */ }
   } finally {
     busy = false;
   }
@@ -284,7 +285,7 @@ $('btn-new').addEventListener('click', () => runAction('dd_ui_new_game', {}));
 /* 初始加载 */
 (async function init() {
   try {
-    const s = await callPlugin('dd_ui_state');
+    const s = await callPlugin('dd_ui_state', {}, ['NO_GAME']);
     if (s && s.state) renderState(s.state);
     else renderState({ stage: 'none' });
   } catch (e) {

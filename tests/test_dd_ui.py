@@ -157,8 +157,9 @@ def test_ui_entries_exist():
     inst = _plugin_with_game(landlord_idx=0)
     for name in ("dd_ui_state", "dd_ui_new_game", "dd_ui_play", "dd_ui_pass"):
         assert callable(getattr(inst, name, None)), name
-    # 无局时 dd_ui_state 应返回 NO_GAME 与空 state
+    # 无局时 dd_ui_state 是正常态：is_error=False、空 state、不带 error 键（面板初始化依赖）
     inst._dd_game = None
     out = _run(inst.dd_ui_state())
-    assert out.get("is_error") is True
+    assert out.get("is_error") is False
     assert out["state"] == {"stage": "none"}
+    assert "error" not in out

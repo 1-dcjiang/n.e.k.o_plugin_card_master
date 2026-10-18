@@ -1478,8 +1478,7 @@ class CardMasterPlugin(NekoPluginBase):
     async def dd_ui_state(self, **_):
         with self._lock:
             if self._dd_game is None:
-                return {"output": "还没有牌局。", "is_error": True, "error": "NO_GAME",
-                        "state": {"stage": "none"}}
+                return {"output": "还没有牌局。", "is_error": False, "state": {"stage": "none"}}
             state = self._dd_ui_state(self._dd_game)
         return {"output": "已刷新", "is_error": False, "state": state}
 
