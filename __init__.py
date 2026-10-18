@@ -130,6 +130,7 @@ class CardMasterPlugin(NekoPluginBase):
         self._lock = threading.Lock()
         self._game_log: list[dict] = []
         self._dd_game: DouDizhuGame | None = None
+        self._dd_stats: dict = {"wins": 0, "losses": 0, "role": "auto"}
         self._live_sessions: dict[str, live_mod.LiveSession] = {}
 
     # ══════════ 生命周期 ══════════
@@ -1076,4 +1077,201 @@ class CardMasterPlugin(NekoPluginBase):
             return {"output": f"无法给出建议：{result.get('error')}\n下一步：{result.get('action')}",
                     "is_error": True, "error": "ADVICE_FAILED"}
         return {"output": result.get("output", ""), "is_error": False, "detail": result}
+
+    # ══════════ 内置斗地主小游戏（对话内文字交互，无需鼠标权限） ══════════
+
+    def _dd_run_to_user(self, game) -> tuple[list[str], dict | None]:
+        """推进 AI 回合直到轮到用户或游戏结束。返回 (行动摘要, 最终胜负result?)。
+
+        内置步数上限防异常死循环（正常一局最多几十步）。
+        """
+        moves: list[str] = []
+        final: dict | None = None
+        guard = 0
+        while game.stage == "playing" and game.current != 0 and guard < 200:
+            guard += 1
+            idx = game.current
+            res = game.ai_play(idx)
+            moves.append(res.get("message", ""))
+            if res.get("result"):
+                final = res["result"]
+                break
+        if guard >= 200:
+            moves.append("⚠️ AI 回合异常（超出步数上限），请用 dd_game_start 重开一局。")
+        return moves, final
+
+    def _dd_update_stats(self, result: dict):
+        """按小游戏身份更新战绩。"""
+        my_role = self._dd_stats.get("role", "auto")
+        won = (result["role"] == "地主" and my_role == "landlord") or (
+            result["role"] == "农民" and my_role == "farmer")
+        if won:
+            self._dd_stats["wins"] += 1
+        else:
+            self._dd_stats["losses"] += 1
+
+    def _dd_build_view(self, game) -> list[str]:
+        """拼小游戏局面展示（你的手牌、AI 手牌数、上一手、轮到谁）。"""
+        st = game.get_state()
+        lines = [
+            f"你的身份：{st['players'][0]['role']} | 底牌：{st['bottom_cards']}",
+            f"你的手牌（{st['players'][0]['card_count']}张）：{st['players'][0]['hand']}",
+            f"YUI_左 {st['players'][1]['card_count']}张 | YUI_右 {st['players'][2]['card_count']}张",
+        ]
+        if st["last_play"] != "（无）":
+            lines.append(f"上一手：{st['last_play']}（{st['last_player']}）")
+        if game.stage == "over":
+            lines.append("本局已结束。用 dd_game_start 再来一局。")
+        elif st["current_player"] == "你":
+            lines.append("轮到你出牌！用 dd_game_play 出牌（如 'dd_game_play 3♠ 5♠ 7♠'），不要就 'dd_game_play 不要'。")
+        else:
+            lines.append(f"轮到 {st['current_player']}（{st['current_role']}）…")
+        return lines
+
+    @llm_tool(
+        name="dd_game_start",
+        description="开始一局内置斗地主小游戏：你和两个 YUI 人机对战（纯文字交互，无需鼠标操控权限）。何时用：用户说'来一局斗地主''斗地主小游戏''打牌'等。参数 role：auto（随机分配身份，默认）/ landlord（我当地主）/ farmer（我当农民）。开局自动发牌分配身份并展示手牌；若地主是 AI 会自动先出到轮到你。出牌用 dd_game_play，看局面用 dd_game_state。",
+        parameters={"type": "object", "properties": {
+            "role": {"type": "string", "description": "auto/landlord/farmer，默认 auto 随机分配"},
+        }, "required": []},
+        timeout=30.0,
+    )
+    async def dd_game_start(self, *, role: str = "", **_):
+        prm = _.get("parameters") or {}
+        r = (role or prm.get("role", "auto")).strip().lower()
+        if r in ("地主", "landlord"):
+            r = "landlord"
+        elif r in ("农民", "farmer"):
+            r = "farmer"
+        else:
+            r = "auto"
+
+        with self._lock:
+            g = DouDizhuGame(["你", "YUI_左", "YUI_右"])
+            if r == "landlord":
+                landlord_idx = 0
+            elif r == "farmer":
+                landlord_idx = 1
+            else:
+                landlord_idx = g.rng.randrange(3)
+            g._set_landlord(landlord_idx, 2)
+            self._dd_game = g
+            self._dd_stats["role"] = "landlord" if landlord_idx == 0 else "farmer"
+
+            lines = [f"🃏 斗地主小游戏开始！你是{'地主' if landlord_idx == 0 else '农民'}。"]
+            if g.current != 0:
+                moves, final = self._dd_run_to_user(g)
+                if final:
+                    self._dd_update_stats(final)
+                    lines.append("地主是 AI，先自动出牌：")
+                    lines.extend(f"  {m}" for m in moves)
+                    lines.append(f"\n🏁 {final['winner']}（{final['role']}）获胜！")
+                    lines.append(f"📊 战绩：胜 {self._dd_stats['wins']} / 负 {self._dd_stats['losses']}")
+                    lines.append("用 dd_game_start 再来一局。")
+                else:
+                    lines.append("地主是 AI，自动出牌：")
+                    lines.extend(f"  {m}" for m in moves)
+            state = g.get_state()
+
+        if g.stage == "over":
+            return {"output": "\n".join(lines), "is_error": False, "game_state": state}
+        lines.extend(self._dd_build_view(g))
+        return {"output": "\n".join(lines), "is_error": False, "game_state": state}
+
+    @llm_tool(
+        name="dd_game_play",
+        description="在斗地主小游戏中出牌。何时用：小游戏开局后轮到你出牌时。参数 cards：要出的牌，空格分隔（如 '3♠ 5♠ 7♠'），支持纯点数（如 '5 5'）自动从手牌匹配花色；传'不要/过/不出'表示不出（先手时不能不出）。出牌后插件自动让两个 YUI 人机依次出牌直到轮到你或一局结束，并返回最新局面。",
+        parameters={"type": "object", "properties": {
+            "cards": {"type": "string", "description": "出牌文字或 '不要'，如 '3♠ 5♠ 7♠'"},
+        }, "required": ["cards"]},
+        timeout=30.0,
+    )
+    async def dd_game_play(self, *, cards: str = "", **_):
+        prm = _.get("parameters") or {}
+        cards_str = cards if cards != "" else prm.get("cards", "")
+        with self._lock:
+            if self._dd_game is None:
+                return {"output": "还没有牌局，请先用 dd_game_start 开一局。", "is_error": True, "error": "NO_GAME"}
+            g = self._dd_game
+            if g.stage != "playing":
+                return {"output": "当前不在出牌阶段，请用 dd_game_start 重新开局。", "is_error": True, "error": "BAD_STAGE"}
+
+            # 防御：若尚未轮到用户，先推进 AI；AI 若已胜则直接收尾
+            pre_moves: list[str] = []
+            if g.current != 0:
+                pre_moves, pre_final = self._dd_run_to_user(g)
+                if pre_final:
+                    self._dd_update_stats(pre_final)
+                    moves = list(pre_moves)
+                    lines = [f"  {m}" for m in moves]
+                    lines.append(f"\n🏁 {pre_final['winner']}（{pre_final['role']}）出完牌获胜！")
+                    won = pre_final["winner"] == "你"
+                    lines.append("🎉 你赢了！" if won else "😔 你输了，再接再厉。")
+                    lines.append(f"📊 战绩：胜 {self._dd_stats['wins']} / 负 {self._dd_stats['losses']}")
+                    lines.append("用 dd_game_start 再来一局。")
+                    return {"output": "\n".join(lines), "is_error": False,
+                            "result": pre_final, "game_state": g.get_state()}
+
+            txt = cards_str.strip()
+            is_pass = txt in ("", "不要", "过", "不出", "pass", "Pass", "PASS", "-", "无", "不叫")
+            card_list: list[int] = []
+            if not is_pass:
+                parse_result = self._parse_doudizhu_cards(txt, g.players[0]["hand"])
+                if parse_result.get("error"):
+                    return {"output": parse_result["error"], "is_error": True, "error": "INVALID_CARDS"}
+                card_list = parse_result["cards"]
+
+            result = g.play(0, card_list)
+            if not result.get("ok"):
+                return {"output": f"出牌失败：{result.get('error')}", "is_error": True, "error": "PLAY_FAILED"}
+
+            moves = list(pre_moves) + [result["message"]]
+            lines: list[str] = []
+            if result.get("result"):
+                self._dd_update_stats(result["result"])
+                lines.extend(f"  {m}" for m in moves)
+                r = result["result"]
+                lines.append(f"\n🏁 {r['winner']}（{r['role']}）出完牌获胜！")
+                won = r["winner"] == "你"
+                lines.append("🎉 你赢了！" if won else "😔 你输了，再接再厉。")
+                lines.append(f"📊 战绩：胜 {self._dd_stats['wins']} / 负 {self._dd_stats['losses']}")
+                lines.append("用 dd_game_start 再来一局。")
+                return {"output": "\n".join(lines), "is_error": False,
+                        "result": result["result"], "game_state": g.get_state()}
+
+            # 自动推进两个 AI 回合
+            ai_moves, final = self._dd_run_to_user(g)
+            moves += ai_moves
+            lines.extend(f"  {m}" for m in moves)
+
+            if final:
+                self._dd_update_stats(final)
+                lines.append(f"\n🏁 {final['winner']}（{final['role']}）出完牌获胜！")
+                won = final["winner"] == "你"
+                lines.append("🎉 你赢了！" if won else "😔 你输了，再接再厉。")
+                lines.append(f"📊 战绩：胜 {self._dd_stats['wins']} / 负 {self._dd_stats['losses']}")
+                lines.append("用 dd_game_start 再来一局。")
+                return {"output": "\n".join(lines), "is_error": False,
+                        "result": final, "game_state": g.get_state()}
+
+            lines.append("")
+            lines.extend(self._dd_build_view(g))
+            return {"output": "\n".join(lines), "is_error": False, "game_state": g.get_state()}
+
+    @llm_tool(
+        name="dd_game_state",
+        description="查看斗地主小游戏当前局面和战绩。何时用：小游戏中想确认手牌、轮到谁、上一手、胜负统计。",
+        parameters={"type": "object", "properties": {}, "required": []},
+        timeout=30.0,
+    )
+    async def dd_game_state(self, **_):
+        with self._lock:
+            if self._dd_game is None:
+                return {"output": "还没有牌局，请先用 dd_game_start 开一局。", "is_error": True, "error": "NO_GAME"}
+            g = self._dd_game
+            st = g.get_state()
+            stats = dict(self._dd_stats)
+        lines = self._dd_build_view(g)
+        lines.append(f"📊 战绩：胜 {stats['wins']} / 负 {stats['losses']}")
+        return {"output": "\n".join(lines), "is_error": False, "game_state": st}
 

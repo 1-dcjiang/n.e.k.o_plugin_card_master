@@ -412,6 +412,7 @@ def suggest_play(hand: list[int], last_play: list[int] | None,
         "candidates": candidates_out,
         "suggestion": {
             "cards": hand_str(suggestion["cards"]) if suggestion else None,
+            "cards_raw": list(suggestion["cards"]) if suggestion else None,
             "type": suggestion["type"] if suggestion else None,
             "type_name": HAND_TYPE_NAMES.get(suggestion["type"], suggestion["type"]) if suggestion else None,
         } if suggestion else None,
@@ -557,33 +558,23 @@ class DouDizhuGame:
         return {"ok": True, "message": f"{p['name']} 出 {hand_str(cards)}", "game_state": self.get_state()}
 
     def ai_play(self, player_idx: int) -> dict:
-        """简单AI出牌：如果是先手出最小单张；否则找最小能压的牌，压不过就不要。"""
+        """增强AI出牌：基于完整候选枚举 + 身份策略（复用 suggest_play）。
+
+        策略：先手出最弱牌型试探并保留炸弹/王炸；压牌用最小能压的组合，
+        压不过就过；农民身份且牌多时节省大牌；对方炸弹/王炸时除非有更大
+        炸弹否则不出。
+        """
         p = self.players[player_idx]
         hand = p["hand"]
-
-        # 先手：出最小单张
-        if not self.last_play:
-            if hand:
-                return self.play(player_idx, [hand[0]])
+        if not hand:
             return self.play(player_idx, [])
 
-        # 尝试找能压的牌
-        last_type = identify_hand(self.last_play)
-        if last_type is None:
-            return self.play(player_idx, [hand[0]] if hand else [])
+        role = "landlord" if p["role"] == "landlord" else "farmer"
+        sug = suggest_play(hand, self.last_play if self.last_play else None, role=role)
 
-        # 简单策略：尝试同类型最小牌
-        candidates = self._find_playable_cards(hand, self.last_play)
-        if candidates:
-            return self.play(player_idx, candidates[0])
-
-        # 尝试炸弹
-        bombs = self._find_bombs(hand)
-        if bombs and last_type["type"] not in ("bomb", "rocket"):
-            return self.play(player_idx, bombs[0])
-
-        # 不要
-        return self.play(player_idx, [])
+        if sug.get("should_pass") or not sug.get("suggestion"):
+            return self.play(player_idx, [])
+        return self.play(player_idx, sug["suggestion"]["cards_raw"])
 
     def _find_playable_cards(self, hand: list[int], last_cards: list[int]) -> list[list[int]]:
         """找所有能压过 last_cards 的同类型牌组合（简化版，只找最小的几种）。"""
