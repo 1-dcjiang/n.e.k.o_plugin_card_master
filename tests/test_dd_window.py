@@ -4,11 +4,16 @@ import threading
 
 from dd_window import DouDizhuWindow, card_display
 from doudizhu import DouDizhuGame
-from plugin.plugins.card_master import CardMasterPlugin
 
 
-def _plugin_with_game(landlord_idx: int = 0) -> CardMasterPlugin:
-    """构造插件实例并开一局小游戏（不启动窗口）。"""
+def _plugin_with_game(landlord_idx: int = 0):
+    """构造插件实例并开一局小游戏（不启动窗口）。
+
+    注意：CardMasterPlugin 在函数内导入——插件包相对宿主树导入，
+    顶层导入会因 isort 的 first-party 判定在本地/CI 之间产生分歧。
+    """
+    from plugin.plugins.card_master import CardMasterPlugin
+
     inst = CardMasterPlugin.__new__(CardMasterPlugin)
     inst._lock = threading.RLock()
     inst._game = None
