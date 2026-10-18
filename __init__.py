@@ -24,6 +24,7 @@ from plugin.sdk.plugin import (
     neko_plugin,
 )
 
+from . import dd_window as dd_window_mod
 from . import kards as kards_mod
 from . import live as live_mod
 from .doudizhu import (
@@ -127,10 +128,11 @@ class CardMasterPlugin(NekoPluginBase):
     def __init__(self, ctx):
         super().__init__(ctx)
         self._game: TexasHoldemGame | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._game_log: list[dict] = []
         self._dd_game: DouDizhuGame | None = None
         self._dd_stats: dict = {"wins": 0, "losses": 0, "role": "auto"}
+        self._dd_window: dd_window_mod.DouDizhuWindow | None = None
         self._live_sessions: dict[str, live_mod.LiveSession] = {}
 
     # ══════════ 生命周期 ══════════
@@ -1111,7 +1113,11 @@ class CardMasterPlugin(NekoPluginBase):
             self._dd_stats["losses"] += 1
 
     def _dd_build_view(self, game) -> list[str]:
-        """拼小游戏局面展示（你的手牌、AI 手牌数、上一手、轮到谁）。"""
+        """拼小游戏局面展示（你的手牌、AI 手牌数、上一手、轮到谁）。
+
+        注意：两个 YUI_AI 的出牌由插件自动完成，你（YUI 助手）只负责出
+        "你"这一个玩家的牌，绝不要替 AI 出牌或替 AI 调用工具。
+        """
         st = game.get_state()
         lines = [
             f"你的身份：{st['players'][0]['role']} | 底牌：{st['bottom_cards']}",
@@ -1125,12 +1131,14 @@ class CardMasterPlugin(NekoPluginBase):
         elif st["current_player"] == "你":
             lines.append("轮到你出牌！用 dd_game_play 出牌（如 'dd_game_play 3♠ 5♠ 7♠'），不要就 'dd_game_play 不要'。")
         else:
-            lines.append(f"轮到 {st['current_player']}（{st['current_role']}）…")
+            lines.append(f"轮到 {st['current_player']}（{st['current_role']}）出牌。"
+                         f"AI 的牌由插件自动出：桌面窗口会自动进行，对话模式请用 dd_game_advance 推进，"
+                         f"你只需等轮到你再用 dd_game_play 出牌。")
         return lines
 
     @llm_tool(
         name="dd_game_start",
-        description="开始一局内置斗地主小游戏：你和两个 YUI 人机对战（纯文字交互，无需鼠标操控权限）。何时用：用户说'来一局斗地主''斗地主小游戏''打牌'等。参数 role：auto（随机分配身份，默认）/ landlord（我当地主）/ farmer（我当农民）。开局自动发牌分配身份并展示手牌；若地主是 AI 会自动先出到轮到你。出牌用 dd_game_play，看局面用 dd_game_state。",
+        description="开始一局内置斗地主小游戏：你和两个 YUI 人机对战。何时用：用户说'来一局斗地主''斗地主小游戏''打牌'等。参数 role：auto（随机分配身份，默认）/ landlord（我当地主）/ farmer（我当农民）。开局自动发牌分配身份并展示手牌，同时弹出一个斗地主桌面窗口（欢乐斗地主风格，显示你的手牌/底牌/AI手牌数/上一手，窗口内 AI 自动出牌、你点击选牌后按'出牌'或'不要'）。重要：两个 YUI_AI 的牌由插件自动出，你只负责出'你'这一个玩家的牌，绝不要替 AI 出牌。对话模式推进 AI 回合用 dd_game_advance，出牌用 dd_game_play，看局面用 dd_game_state，开关窗口用 dd_game_window。",
         parameters={"type": "object", "properties": {
             "role": {"type": "string", "description": "auto/landlord/farmer，默认 auto 随机分配"},
         }, "required": []},
@@ -1157,21 +1165,16 @@ class CardMasterPlugin(NekoPluginBase):
             g._set_landlord(landlord_idx, 2)
             self._dd_game = g
             self._dd_stats["role"] = "landlord" if landlord_idx == 0 else "farmer"
+            self._dd_ensure_window_locked()
 
             lines = [f"🃏 斗地主小游戏开始！你是{'地主' if landlord_idx == 0 else '农民'}。"]
+            lines.append("🖥️ 已弹出斗地主桌面窗口：你的手牌、底牌和上一手都显示在那里，"
+                         "AI 会在窗口里自动出牌，轮到你时窗口会提示。你也可以继续用对话出牌。")
             if g.current != 0:
-                moves, final = self._dd_run_to_user(g)
-                if final:
-                    self._dd_update_stats(final)
-                    lines.append("地主是 AI，先自动出牌：")
-                    lines.extend(f"  {m}" for m in moves)
-                    lines.append(f"\n🏁 {final['winner']}（{final['role']}）获胜！")
-                    lines.append(f"📊 战绩：胜 {self._dd_stats['wins']} / 负 {self._dd_stats['losses']}")
-                    lines.append("用 dd_game_start 再来一局。")
-                else:
-                    lines.append("地主是 AI，自动出牌：")
-                    lines.extend(f"  {m}" for m in moves)
+                lines.append(f"地主是 {g.players[g.current]['name']}，"
+                             f"AI 先出牌（窗口自动进行；对话模式用 dd_game_advance 推进）。")
             state = g.get_state()
+        self._dd_render_window()
 
         if g.stage == "over":
             return {"output": "\n".join(lines), "is_error": False, "game_state": state}
@@ -1180,7 +1183,7 @@ class CardMasterPlugin(NekoPluginBase):
 
     @llm_tool(
         name="dd_game_play",
-        description="在斗地主小游戏中出牌。何时用：小游戏开局后轮到你出牌时。参数 cards：要出的牌，空格分隔（如 '3♠ 5♠ 7♠'），支持纯点数（如 '5 5'）自动从手牌匹配花色；传'不要/过/不出'表示不出（先手时不能不出）。出牌后插件自动让两个 YUI 人机依次出牌直到轮到你或一局结束，并返回最新局面。",
+        description="在斗地主小游戏中出牌。何时用：小游戏开局后轮到'你'出牌时。参数 cards：要出的牌，空格分隔（如 '3♠ 5♠ 7♠'），支持纯点数（如 '5 5'）自动从手牌匹配花色；传'不要/过/不出'表示不出（先手时不能不出）。重要边界：两个 YUI_AI 的牌由插件自动出，你只出'你'的牌；若当前不是轮到你（返回提示轮到某 AI），不要替 AI 出牌，先用 dd_game_advance 推进 AI 回合（窗口模式下窗口会自动进行）。你出牌成功后插件会自动让两个 AI 依次出到轮到你，并同步桌面窗口。",
         parameters={"type": "object", "properties": {
             "cards": {"type": "string", "description": "出牌文字或 '不要'，如 '3♠ 5♠ 7♠'"},
         }, "required": ["cards"]},
@@ -1196,21 +1199,13 @@ class CardMasterPlugin(NekoPluginBase):
             if g.stage != "playing":
                 return {"output": "当前不在出牌阶段，请用 dd_game_start 重新开局。", "is_error": True, "error": "BAD_STAGE"}
 
-            # 防御：若尚未轮到用户，先推进 AI；AI 若已胜则直接收尾
-            pre_moves: list[str] = []
+            # 交互边界：只有轮到用户才能出牌，绝不由插件代打 AI 回合
             if g.current != 0:
-                pre_moves, pre_final = self._dd_run_to_user(g)
-                if pre_final:
-                    self._dd_update_stats(pre_final)
-                    moves = list(pre_moves)
-                    lines = [f"  {m}" for m in moves]
-                    lines.append(f"\n🏁 {pre_final['winner']}（{pre_final['role']}）出完牌获胜！")
-                    won = pre_final["winner"] == "你"
-                    lines.append("🎉 你赢了！" if won else "😔 你输了，再接再厉。")
-                    lines.append(f"📊 战绩：胜 {self._dd_stats['wins']} / 负 {self._dd_stats['losses']}")
-                    lines.append("用 dd_game_start 再来一局。")
-                    return {"output": "\n".join(lines), "is_error": False,
-                            "result": pre_final, "game_state": g.get_state()}
+                return {"output": f"当前轮到 {g.players[g.current]['name']}（AI）出牌，"
+                                 f"不是轮到你。你只出你自己的牌：请用 dd_game_advance 推进 AI 回合"
+                                 f"（桌面窗口会自动进行，等待轮到你即可），轮到你再用 dd_game_play 出牌。",
+                        "is_error": True, "error": "NOT_YOUR_TURN",
+                        "game_state": g.get_state()}
 
             txt = cards_str.strip()
             is_pass = txt in ("", "不要", "过", "不出", "pass", "Pass", "PASS", "-", "无", "不叫")
@@ -1225,7 +1220,7 @@ class CardMasterPlugin(NekoPluginBase):
             if not result.get("ok"):
                 return {"output": f"出牌失败：{result.get('error')}", "is_error": True, "error": "PLAY_FAILED"}
 
-            moves = list(pre_moves) + [result["message"]]
+            moves = [result["message"]]
             lines: list[str] = []
             if result.get("result"):
                 self._dd_update_stats(result["result"])
@@ -1236,10 +1231,11 @@ class CardMasterPlugin(NekoPluginBase):
                 lines.append("🎉 你赢了！" if won else "😔 你输了，再接再厉。")
                 lines.append(f"📊 战绩：胜 {self._dd_stats['wins']} / 负 {self._dd_stats['losses']}")
                 lines.append("用 dd_game_start 再来一局。")
+                self._dd_render_window()
                 return {"output": "\n".join(lines), "is_error": False,
                         "result": result["result"], "game_state": g.get_state()}
 
-            # 自动推进两个 AI 回合
+            # 你出牌成功后，由插件自动推进两个 AI 回合（正常流程）
             ai_moves, final = self._dd_run_to_user(g)
             moves += ai_moves
             lines.extend(f"  {m}" for m in moves)
@@ -1251,12 +1247,14 @@ class CardMasterPlugin(NekoPluginBase):
                 lines.append("🎉 你赢了！" if won else "😔 你输了，再接再厉。")
                 lines.append(f"📊 战绩：胜 {self._dd_stats['wins']} / 负 {self._dd_stats['losses']}")
                 lines.append("用 dd_game_start 再来一局。")
+                self._dd_render_window()
                 return {"output": "\n".join(lines), "is_error": False,
                         "result": final, "game_state": g.get_state()}
 
             lines.append("")
             lines.extend(self._dd_build_view(g))
-            return {"output": "\n".join(lines), "is_error": False, "game_state": g.get_state()}
+        self._dd_render_window()
+        return {"output": "\n".join(lines), "is_error": False, "game_state": g.get_state()}
 
     @llm_tool(
         name="dd_game_state",
@@ -1271,7 +1269,186 @@ class CardMasterPlugin(NekoPluginBase):
             g = self._dd_game
             st = g.get_state()
             stats = dict(self._dd_stats)
+            win = self._dd_window is not None and self._dd_window.is_alive_ok()
         lines = self._dd_build_view(g)
         lines.append(f"📊 战绩：胜 {stats['wins']} / 负 {stats['losses']}")
+        lines.append(f"🖥️ 桌面窗口：{'已打开（AI 自动出牌，也可用 dd_game_advance 在对话里推进）' if win else '未打开（用 dd_game_window open 打开，或继续用对话出牌）'}")
         return {"output": "\n".join(lines), "is_error": False, "game_state": st}
+
+    @llm_tool(
+        name="dd_game_advance",
+        description="推进斗地主小游戏的 AI 回合：让插件把轮到 AI 的牌自动出完，直到轮到你或一局结束。何时用：对话模式（未开桌面窗口）下局面显示'轮到 YUI_左/YUI_右 出牌'时。注意：AI 的牌由插件自动出，你只是触发推进，不要替 AI 出牌。窗口模式下窗口会自动进行，无需调用本工具。",
+        parameters={"type": "object", "properties": {}, "required": []},
+        timeout=30.0,
+    )
+    async def dd_game_advance(self, **_):
+        with self._lock:
+            if self._dd_game is None:
+                return {"output": "还没有牌局，请先用 dd_game_start 开一局。", "is_error": True, "error": "NO_GAME"}
+            g = self._dd_game
+            if g.stage != "playing":
+                return {"output": "当前不在出牌阶段，无需推进。", "is_error": False, "game_state": g.get_state()}
+            if g.current == 0:
+                return {"output": "已经轮到你出牌，直接用 dd_game_play 出牌即可。", "is_error": False, "game_state": g.get_state()}
+            moves, final = self._dd_run_to_user(g)
+            lines: list[str] = []
+            if final:
+                self._dd_update_stats(final)
+                lines.extend(f"  {m}" for m in moves)
+                lines.append(f"\n🏁 {final['winner']}（{final['role']}）出完牌获胜！")
+                won = final["winner"] == "你"
+                lines.append("🎉 你赢了！" if won else "😔 你输了，再接再厉。")
+                lines.append(f"📊 战绩：胜 {self._dd_stats['wins']} / 负 {self._dd_stats['losses']}")
+                lines.append("用 dd_game_start 再来一局。")
+                self._dd_render_window()
+                return {"output": "\n".join(lines), "is_error": False,
+                        "result": final, "game_state": g.get_state()}
+            lines.append("AI 回合已自动完成：")
+            lines.extend(f"  {m}" for m in moves)
+            lines.append("")
+            lines.extend(self._dd_build_view(g))
+        self._dd_render_window()
+        return {"output": "\n".join(lines), "is_error": False, "game_state": g.get_state()}
+
+    @llm_tool(
+        name="dd_game_window",
+        description="打开或关闭斗地主小游戏的桌面窗口（欢乐斗地主风格，显示你的手牌/底牌/AI手牌数/上一手；窗口内 AI 自动出牌，你点击选牌后按'出牌'或'不要'）。何时用：用户想看到图形界面、窗口被关掉想重新打开、或想关掉窗口只用对话玩。参数 op：open（打开窗口，默认）/ close（关闭窗口）/ status（查看窗口状态）。无需鼠标操控权限，窗口只用于展示和点击出牌。",
+        parameters={"type": "object", "properties": {
+            "op": {"type": "string", "description": "open/close/status，默认 open"},
+        }, "required": []},
+        timeout=30.0,
+    )
+    async def dd_game_window(self, *, op: str = "", **_):
+        prm = _.get("parameters") or {}
+        o = (op or prm.get("op", "open")).strip().lower()
+        if o in ("close", "关闭"):
+            with self._lock:
+                w = self._dd_window
+                self._dd_window = None
+            if w is not None:
+                w.request_close()
+            return {"output": "斗地主桌面窗口已关闭。你仍可用 dd_game_play / dd_game_advance / dd_game_state 继续用对话玩。",
+                    "is_error": False}
+        if o in ("status", "状态"):
+            with self._lock:
+                win = self._dd_window is not None and self._dd_window.is_alive_ok()
+            return {"output": f"斗地主桌面窗口：{'已打开' if win else '未打开'}。"
+                              f"{'窗口内 AI 自动出牌，也可用 dd_game_state 看局面。' if win else '用 dd_game_window open 打开，或继续用对话出牌。'}",
+                    "is_error": False}
+        # open
+        with self._lock:
+            if self._dd_game is None:
+                return {"output": "还没有牌局，请先用 dd_game_start 开一局再打开窗口。", "is_error": True, "error": "NO_GAME"}
+            self._dd_ensure_window_locked()
+        self._dd_render_window()
+        return {"output": "🖥️ 斗地主桌面窗口已打开：你的手牌、底牌和上一手都显示在那里，"
+                         "AI 会在窗口里自动出牌，轮到你时窗口会提示。你也可以继续用对话出牌。",
+                "is_error": False, "game_state": self._dd_game.get_state() if self._dd_game else None}
+
+    # ── 小游戏桌面窗口辅助 ──────────────────────────
+
+    def _dd_ensure_window_locked(self) -> None:
+        """（须持锁调用）确保窗口存在。窗口不可用（导入失败/无法创建）时静默降级。"""
+        if self._dd_window is not None and self._dd_window.is_alive_ok():
+            return
+        try:
+            win = dd_window_mod.DouDizhuWindow(
+                on_action=self._dd_window_on_action,
+                on_close=self._dd_window_on_close,
+            )
+        except Exception:
+            self._dd_window = None
+            return
+        win.start()
+        win._ready.wait(timeout=5)  # 等待 Tk 初始化完成
+        self._dd_window = win if win.is_alive_ok() else None
+
+    def _dd_window_on_close(self) -> None:
+        """窗口线程结束回调（任意线程触发）。"""
+        # 只清引用，不持有锁（可能正被持锁调用）；下次 ensure 会重建
+        try:
+            if self._dd_window is not None and not self._dd_window.is_alive_ok():
+                self._dd_window = None
+        except Exception:
+            pass
+
+    def _dd_window_on_action(self, action: dict) -> None:
+        """窗口按钮回调（在 UI 线程执行）。在锁保护下执行出牌/不要/重开/AI 推进。"""
+        try:
+            if not self._lock.acquire(timeout=3):
+                return
+            try:
+                g = self._dd_game
+                if g is None:
+                    return
+                op = action.get("op")
+                if op == "tick":
+                    # 窗口自动推进：AI 出一步
+                    if g.stage == "playing" and g.current != 0:
+                        res = g.ai_play(g.current)
+                        if res.get("result"):
+                            self._dd_update_stats(res["result"])
+                elif op == "play":
+                    cards = list(action.get("cards") or [])
+                    if g.stage == "playing" and g.current == 0:
+                        result = g.play(0, cards)
+                        if result.get("ok"):
+                            moves, final = self._dd_run_to_user(g)
+                            if final:
+                                self._dd_update_stats(final)
+                elif op == "pass":
+                    if g.stage == "playing" and g.current == 0:
+                        result = g.play(0, [])
+                        if result.get("ok"):
+                            moves, final = self._dd_run_to_user(g)
+                            if final:
+                                self._dd_update_stats(final)
+                elif op == "new_game":
+                    ng = DouDizhuGame(["你", "YUI_左", "YUI_右"])
+                    landlord_idx = ng.rng.randrange(3)
+                    ng._set_landlord(landlord_idx, 2)
+                    self._dd_game = ng
+                    self._dd_stats["role"] = "landlord" if landlord_idx == 0 else "farmer"
+            finally:
+                self._lock.release()
+            self._dd_render_window()
+        except Exception:
+            pass  # 窗口回调失败不影响主流程
+
+    def _dd_window_state(self, game) -> dict:
+        """构建窗口渲染数据（不持锁，调用方保证安全）。"""
+        st = game.get_state()
+        players = game.players
+        last_cards = list(game.last_play) if game.last_play else []
+        return {
+            "stage": game.stage,
+            "user_role": st["players"][0]["role"],
+            "user_hand": list(players[0]["hand"]),
+            "bottom": list(game.bottom_cards) if game.stage != "bidding" else [],
+            "last_play": last_cards,
+            "last_player": players[game.last_player]["name"] if game.last_player is not None else "",
+            "players": [
+                {"name": pl["name"], "role": "地主" if pl["role"] == "landlord" else "农民",
+                 "count": len(pl["hand"])}
+                for pl in players
+            ],
+            "current": st["current_player"],
+            "must_play": bool(game.stage == "playing" and not game.last_play and game.current == 0),
+            "message": st.get("current_hand", ""),
+            "stats": f"胜 {self._dd_stats['wins']} / 负 {self._dd_stats['losses']}",
+        }
+
+    def _dd_render_window(self) -> None:
+        """把最新局面推送到桌面窗口（任意线程调用，非阻塞）。"""
+        w = self._dd_window
+        if w is None:
+            return
+        try:
+            with self._lock:
+                if self._dd_game is None:
+                    return
+                state = self._dd_window_state(self._dd_game)
+            w.push_render(state)
+        except Exception:
+            pass
 
