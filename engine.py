@@ -550,18 +550,20 @@ def calculate_odds(hand: list[int], community: list[int], opponents: int = 1,
 
 def suggest_from_state(hand: list[int], community: list[int], to_call: int, pot: int,
                        chips: int, active_count: int, big_blind: int,
-                       current_bet: int = 0, simulations: int = 1500) -> dict:
+                       current_bet: int = 0, simulations: int = 1500,
+                       seed: int | None = None) -> dict:
     """从外部局面状态直接给出出牌建议（不依赖 game 对象）。
 
     供实时打牌（live）模式复用：YUI 从屏幕上读取局面后传入，返回与
     suggest_action 相同的决策结构。参数：
     hand: 你的2张手牌；community: 公共牌（0-5张）；to_call: 当前需跟注额；
     pot: 底池；chips: 你的筹码；active_count: 仍在局中的玩家人数；
-    big_blind: 大盲注；current_bet: 当前轮最大下注（live 模式下可不传）。
+    big_blind: 大盲注；current_bet: 当前轮最大下注（live 模式下可不传）；
+    seed: 蒙特卡洛随机种子（不传则每次随机，适合实时使用；传固定值可复现）。
     """
     # 计算胜率
     odds = calculate_odds(hand, community, opponents=max(1, active_count - 1),
-                          simulations=simulations)
+                          simulations=simulations, seed=seed)
     win_rate = odds["win_rate"]
     tie_rate = odds["tie_rate"]
     equity = win_rate + tie_rate * 0.5  # 有效胜率（平局算一半）

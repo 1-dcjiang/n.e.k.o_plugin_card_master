@@ -9,11 +9,14 @@ from engine import suggest_from_state
 
 
 class TestSuggestFromState:
+    # 蒙特卡洛用固定种子，避免随机方差导致 flaky（曾出现 72o 胜率估计偏高误判 call）
+    _SEED = 20260731
+
     def test_strong_hand_preflop(self):
         # AA 对单对手，无需跟注 → 应加注（engine 编码：A=48, K=44, T=32, 7=20, 2=0）
         adv = suggest_from_state(
             hand=[12 * 4, 12 * 4 + 1], community=[], to_call=0, pot=60,
-            chips=980, active_count=2, big_blind=20,
+            chips=980, active_count=2, big_blind=20, seed=self._SEED,
         )
         assert adv["suggestion"] == "raise"
         assert adv["win_rate"] > 60
@@ -23,7 +26,7 @@ class TestSuggestFromState:
         # 72o 面对超大额跟注（底池赔率远高于其胜率）→ 应弃牌
         adv = suggest_from_state(
             hand=[5 * 4, 0 * 4 + 1], community=[], to_call=350, pot=500,
-            chips=500, active_count=2, big_blind=20,
+            chips=500, active_count=2, big_blind=20, seed=self._SEED,
         )
         assert adv["suggestion"] == "fold"
 
@@ -33,6 +36,7 @@ class TestSuggestFromState:
             hand=[8 * 4, 8 * 4 + 1],
             community=[8 * 4 + 2, 5 * 4, 6 * 4 + 1],
             to_call=0, pot=100, chips=900, active_count=2, big_blind=20,
+            seed=self._SEED,
         )
         assert adv["suggestion"] == "raise"
 
@@ -40,6 +44,7 @@ class TestSuggestFromState:
         adv = suggest_from_state(
             hand=[12 * 4, 11 * 4], community=[0 * 4, 3 * 4, 7 * 4],
             to_call=40, pot=200, chips=760, active_count=3, big_blind=20,
+            seed=self._SEED,
         )
         for key in ("suggestion", "reason", "raise_to", "win_rate", "tie_rate",
                     "equity", "pot_odds", "pot_odds_detail", "your_hand",
