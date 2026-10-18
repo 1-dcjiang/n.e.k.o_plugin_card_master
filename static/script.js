@@ -29,28 +29,36 @@ async function mutationHeaders(timeoutMs = CSRF_BOOTSTRAP_TIMEOUT_MS) {
   });
   await wait;
   clearTimeout(waitTimer);
-  if (pending) return { 'X-CSRF-Token': await pending };
-  return {};
+  if (!pending) return {};
+  try {
+    const token = await pending;
+    if (token) return { 'X-CSRF-Token': token };
+    console.warn('CSRF token not ready; sending without it');
+    return {};
+  } catch (error) {
+    if (csrfTokenPromise === pending) csrfTokenPromise = null;
+    console.warn('CSRF token unavailable; sending without it:', error);
+    return {};
+  }
+}
+
+async function isCsrfTokenFailure(response) {
+  if (response.headers.get('X-CSRF-Failure') === 'token') return true;
+  try {
+    const data = await response.clone().json();
+    return Boolean(data && data.detail && data.detail.csrf_failure === 'token');
+  } catch (e) { /* not json */ }
+  return false;
 }
 
 async function postWithCsrfRetry(url, body) {
-  const headers = await mutationHeaders();
-  headers['Content-Type'] = 'application/json';
-  let resp = await fetch(url, { method: 'POST', headers, body, credentials: 'same-origin' });
-  if (resp.status === 403) {
-    let csrfFailure = false;
-    try {
-      const data = await resp.json();
-      csrfFailure = data && data.csrf_failure === 'token';
-    } catch (e) { /* not json */ }
-    if (csrfFailure) {
-      csrfTokenPromise = null;
-      const retryHeaders = await mutationHeaders(CSRF_BOOTSTRAP_RETRY_TIMEOUT_MS);
-      retryHeaders['Content-Type'] = 'application/json';
-      resp = await fetch(url, { method: 'POST', headers: retryHeaders, body, credentials: 'same-origin' });
-    }
+  for (let attempt = 0; ; attempt += 1) {
+    const headers = await mutationHeaders(attempt === 0 ? CSRF_BOOTSTRAP_TIMEOUT_MS : CSRF_BOOTSTRAP_RETRY_TIMEOUT_MS);
+    headers['Content-Type'] = 'application/json';
+    const resp = await fetch(url, { method: 'POST', headers, body, credentials: 'same-origin' });
+    if (attempt > 0 || resp.status !== 403 || !(await isCsrfTokenFailure(resp))) return resp;
+    csrfTokenPromise = null;
   }
-  return resp;
 }
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
