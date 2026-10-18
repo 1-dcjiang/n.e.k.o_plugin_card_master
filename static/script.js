@@ -79,9 +79,21 @@ async function callPlugin(entry, args = {}) {
       const exp = await fetch(`${RUNS_URL}/${runId}/export`);
       if (!exp.ok) return {};
       const { items = [] } = await exp.json();
-      const item = items.find((i) => i.type === 'json' && i.json) || items[0];
+      let item = null;
+      for (const it of items) {
+        if (it && typeof it === 'object' && (it.json || it.json_data)) { item = it; break; }
+      }
       if (!item) return {};
-      let raw = item.json || {};
+      let raw = item.json || item.json_data || {};
+      /* ok()/fail() 信封：外层含 success/error/time 键，data 才是 action 返回值 */
+      if (raw && typeof raw === 'object' && 'success' in raw && 'error' in raw) {
+        if (raw.data && typeof raw.data === 'object') {
+          raw = raw.data;
+        } else if (raw.success === false && raw.error) {
+          throw new Error((raw.error && raw.error.message) || '插件调用失败');
+        }
+      }
+      /* 兼容旧式嵌套（data 内含 success/error 标记） */
       while (raw && raw.data && typeof raw.data === 'object' && ('success' in raw.data || 'error' in raw.data)) {
         raw = raw.data;
       }
