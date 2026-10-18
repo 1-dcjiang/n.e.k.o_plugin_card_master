@@ -2,10 +2,9 @@
 
 import threading
 
-from plugin.plugins.card_master import CardMasterPlugin
-
 from dd_window import DouDizhuWindow, card_display
 from doudizhu import DouDizhuGame
+from plugin.plugins.card_master import CardMasterPlugin
 
 
 def _plugin_with_game(landlord_idx: int = 0) -> CardMasterPlugin:
