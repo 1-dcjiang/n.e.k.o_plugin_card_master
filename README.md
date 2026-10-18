@@ -178,6 +178,7 @@ https://market.project-neko.cn/#/plugin/XXX
 
 | 版本 | 要点 |
 |---|---|
+| **v0.3.2** | 复查优化：修复窗口内你出完最后一张获胜战绩漏记；修复地主 20 张手牌超出画布与点击错位（手牌自适应缩宽）；窗口创建失败时如实提示改用对话模式；窗口回调锁等待 3s→0.5s 防 UI 卡顿；窗口关闭回调加锁防竞态；窗口初始化短超时轮询；局面提示按窗口开关给出对应操作引导；+5 测试（共 100） |
 | **v0.3.1** | 新增斗地主**桌面窗口**（欢乐斗地主风格，dd_game_start 自动弹出；显示手牌/底牌/AI手牌数/上一手，AI 在窗口内自动出牌，点击选牌出牌）；修复"YUI 自己和自己打"交互边界：轮到 AI 时不再由插件代打，对话模式用 dd_game_advance 明确推进；新增 dd_game_advance / dd_game_window 工具；4 个窗口模块测试（共 95） |
 | **v0.3.0** | 新增内置斗地主小游戏（dd_game_start/dd_game_play/dd_game_state）：纯文字与两个 YUI 人机对战、自动推进 AI 回合、记录战绩；AI 出牌全面升级（复用 suggest_play 完整 14 牌型候选枚举 + 身份策略 + 炸弹/王炸保留）；12 个新测试（共 91） |
 | **v0.2.0** | 新增实时打牌（live）模式：live_session/live_report/live_action_done/live_status 会话工具 + doudizhu_live_advice（完整候选枚举+身份策略）+ kards_live_advice（优先级回合建议）；engine 提取 suggest_from_state 纯函数供 live 复用；21 个新测试 |

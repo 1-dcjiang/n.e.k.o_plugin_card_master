@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 
 from plugin.sdk.plugin import (
     NekoPluginBase,
@@ -1131,9 +1132,9 @@ class CardMasterPlugin(NekoPluginBase):
         elif st["current_player"] == "你":
             lines.append("轮到你出牌！用 dd_game_play 出牌（如 'dd_game_play 3♠ 5♠ 7♠'），不要就 'dd_game_play 不要'。")
         else:
+            win_on = self._dd_window is not None and self._dd_window.is_alive_ok()
             lines.append(f"轮到 {st['current_player']}（{st['current_role']}）出牌。"
-                         f"AI 的牌由插件自动出：桌面窗口会自动进行，对话模式请用 dd_game_advance 推进，"
-                         f"你只需等轮到你再用 dd_game_play 出牌。")
+                         f"AI 的牌由插件自动出：{'桌面窗口会自动进行，你只需等轮到你再用 dd_game_play 出牌。' if win_on else '对话模式请用 dd_game_advance 推进，轮到你再用 dd_game_play 出牌。'}")
         return lines
 
     @llm_tool(
@@ -1165,11 +1166,15 @@ class CardMasterPlugin(NekoPluginBase):
             g._set_landlord(landlord_idx, 2)
             self._dd_game = g
             self._dd_stats["role"] = "landlord" if landlord_idx == 0 else "farmer"
-            self._dd_ensure_window_locked()
+            win_ok = self._dd_ensure_window_locked()
+            window_hint = ("🖥️ 已弹出斗地主桌面窗口：你的手牌、底牌和上一手都显示在那里，"
+                           "AI 会在窗口里自动出牌，轮到你时窗口会提示。你也可以继续用对话出牌。"
+                           if win_ok else
+                           "⚠️ 桌面窗口未能打开（本机可能不支持图形界面），本局将用纯对话模式："
+                           "AI 回合用 dd_game_advance 推进，轮到你用 dd_game_play 出牌。")
 
             lines = [f"🃏 斗地主小游戏开始！你是{'地主' if landlord_idx == 0 else '农民'}。"]
-            lines.append("🖥️ 已弹出斗地主桌面窗口：你的手牌、底牌和上一手都显示在那里，"
-                         "AI 会在窗口里自动出牌，轮到你时窗口会提示。你也可以继续用对话出牌。")
+            lines.append(window_hint)
             if g.current != 0:
                 lines.append(f"地主是 {g.players[g.current]['name']}，"
                              f"AI 先出牌（窗口自动进行；对话模式用 dd_game_advance 推进）。")
@@ -1339,7 +1344,11 @@ class CardMasterPlugin(NekoPluginBase):
         with self._lock:
             if self._dd_game is None:
                 return {"output": "还没有牌局，请先用 dd_game_start 开一局再打开窗口。", "is_error": True, "error": "NO_GAME"}
-            self._dd_ensure_window_locked()
+            win_ok = self._dd_ensure_window_locked()
+        if not win_ok:
+            return {"output": "⚠️ 桌面窗口未能打开（本机可能不支持图形界面），请继续用对话模式玩："
+                             "AI 回合用 dd_game_advance 推进，轮到你用 dd_game_play 出牌。",
+                    "is_error": False}
         self._dd_render_window()
         return {"output": "🖥️ 斗地主桌面窗口已打开：你的手牌、底牌和上一手都显示在那里，"
                          "AI 会在窗口里自动出牌，轮到你时窗口会提示。你也可以继续用对话出牌。",
@@ -1347,10 +1356,10 @@ class CardMasterPlugin(NekoPluginBase):
 
     # ── 小游戏桌面窗口辅助 ──────────────────────────
 
-    def _dd_ensure_window_locked(self) -> None:
-        """（须持锁调用）确保窗口存在。窗口不可用（导入失败/无法创建）时静默降级。"""
+    def _dd_ensure_window_locked(self) -> bool:
+        """（须持锁调用）确保窗口存在。返回窗口是否可用；不可用时静默降级。"""
         if self._dd_window is not None and self._dd_window.is_alive_ok():
-            return
+            return True
         try:
             win = dd_window_mod.DouDizhuWindow(
                 on_action=self._dd_window_on_action,
@@ -1358,25 +1367,40 @@ class CardMasterPlugin(NekoPluginBase):
             )
         except Exception:
             self._dd_window = None
-            return
+            return False
         win.start()
-        win._ready.wait(timeout=5)  # 等待 Tk 初始化完成
-        self._dd_window = win if win.is_alive_ok() else None
+        # 等待 Tk 初始化：短超时轮询线程存活，避免无显示环境空等 5 秒
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if win._ready.is_set():
+                break
+            if not win.is_alive():
+                break
+            time.sleep(0.02)
+        if win._ready.is_set() and win.is_alive_ok():
+            self._dd_window = win
+            return True
+        # 初始化失败或已退出
+        self._dd_window = None
+        return False
 
     def _dd_window_on_close(self) -> None:
         """窗口线程结束回调（任意线程触发）。"""
-        # 只清引用，不持有锁（可能正被持锁调用）；下次 ensure 会重建
         try:
-            if self._dd_window is not None and not self._dd_window.is_alive_ok():
-                self._dd_window = None
+            if self._lock.acquire(timeout=1):
+                try:
+                    if self._dd_window is not None and not self._dd_window.is_alive_ok():
+                        self._dd_window = None
+                finally:
+                    self._lock.release()
         except Exception:
             pass
 
     def _dd_window_on_action(self, action: dict) -> None:
         """窗口按钮回调（在 UI 线程执行）。在锁保护下执行出牌/不要/重开/AI 推进。"""
         try:
-            if not self._lock.acquire(timeout=3):
-                return
+            if not self._lock.acquire(timeout=0.5):
+                return  # 主线程短时持锁，避免 UI 长时间卡顿
             try:
                 g = self._dd_game
                 if g is None:
@@ -1393,6 +1417,9 @@ class CardMasterPlugin(NekoPluginBase):
                     if g.stage == "playing" and g.current == 0:
                         result = g.play(0, cards)
                         if result.get("ok"):
+                            if result.get("result"):
+                                # 你出完最后一张直接获胜
+                                self._dd_update_stats(result["result"])
                             moves, final = self._dd_run_to_user(g)
                             if final:
                                 self._dd_update_stats(final)

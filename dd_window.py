@@ -232,12 +232,11 @@ class DouDizhuWindow(threading.Thread):
 
         # 底部用户手牌
         if hand:
-            total_w = CARD_W * len(hand)
-            x_start = max(10, (CANVAS_W - total_w) // 2)
+            w, x_start = self._hand_layout()
             for i, card in enumerate(hand):
-                x = x_start + i * CARD_W
+                x = x_start + i * w
                 y = HAND_Y - (SELECT_DY if card in self._selected else 0)
-                self._draw_single(c, card, x, y, CARD_W, CARD_H)
+                self._draw_single(c, card, x, y, w, CARD_H)
 
         # 阶段消息 / 胜负
         if stage == "bidding":
@@ -276,6 +275,14 @@ class DouDizhuWindow(threading.Thread):
 
     # ── 交互 ──────────────────────────────────────
 
+    def _hand_layout(self) -> tuple[int, int]:
+        """返回 (手牌宽度, 起始x)。手牌多时自适应缩宽，防止超出画布。"""
+        n = len(self._user_hand)
+        if n <= 0:
+            return CARD_W, 10
+        w = min(CARD_W, (CANVAS_W - 40) // n)
+        return w, (CANVAS_W - w * n) // 2
+
     def _on_canvas_click(self, event) -> None:
         if not self._state or not self._user_hand:
             return
@@ -283,9 +290,8 @@ class DouDizhuWindow(threading.Thread):
         if st.get("stage") != "playing" or st.get("current") != "你":
             return
         x = event.x
-        total_w = CARD_W * len(self._user_hand)
-        x_start = max(10, (CANVAS_W - total_w) // 2)
-        idx = (x - x_start) // CARD_W
+        w, x_start = self._hand_layout()
+        idx = (x - x_start) // w
         if 0 <= idx < len(self._user_hand):
             card = self._user_hand[idx]
             if card in self._selected:
