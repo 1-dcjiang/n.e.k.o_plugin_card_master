@@ -1521,6 +1521,10 @@ class CardMasterPlugin(NekoPluginBase):
                 "rounds": {"type": "integer", "description": "对弈轮数（selfplay 用）"},
                 "cards": {"type": "string", "description": "斗地主出牌（doudizhu 用）"},
                 "score": {"type": "integer", "description": "斗地主叫分（doudizhu 用）"},
+                "sub_action": {
+                    "type": "string",
+                    "description": "doudizhu 子操作：new（开新局，默认）/ bid（叫分）/ play（出牌）/ state（看局面）/ identify（识别牌型）",
+                },
             },
         },
         timeout=60.0,
