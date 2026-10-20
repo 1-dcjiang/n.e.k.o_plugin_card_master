@@ -1482,3 +1482,96 @@ class CardMasterPlugin(NekoPluginBase):
             state = self._dd_ui_state(self._dd_game)
         return {"output": "已刷新", "is_error": False, "state": state}
 
+    # ══════════ 通用入口（plugin_entry run：评估侧主路由） ══════════
+    # 4 个 dd_ui_* 入口仅服务浏览器面板场景；通用能力（规则/评估/胜率/建议/对弈/斗地主）
+    # 此前只挂在 llm_tool 上。v0.4.5 注册 run 入口按 action 分派，保证评估侧可明确路由。
+    # 方法名不能以下划线开头（bili_viewer v0.6.22 教训）。
+
+    @plugin_entry(
+        id="run",
+        name="卡牌大师",
+        description=(
+            "卡牌大师（card_master）：让 YUI 学习和练习卡牌游戏（德州扑克、掼蛋、Kards、斗地主）。"
+            "用户说'德州扑克怎么玩/这手牌什么牌型/我这手胜率多少/该不该跟注/出什么牌/开一局牌/练练打牌/斗地主'等"
+            "卡牌相关请求时使用。"
+            "操作：rules（查规则，game=poker/kards/guandan/doudizhu/all）/ evaluate（评牌型，hand+community 手牌与公共牌）/ "
+            "new_game（开德州局）/ action（出牌 fold/check/call/raise）/ state（看牌局状态）/ odds（胜率蒙特卡洛模拟）/ "
+            "suggest（出牌建议）/ selfplay（自我对弈训练）/ next_hand（换下一手）/ doudizhu（斗地主：new/bid/play/state/identify）。"
+            "回复纪律：直接给出规则、牌型、胜率或建议结论，可附简要依据，不加多余话术，不编造牌局结果。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "rules/evaluate/new_game/action/state/odds/suggest/selfplay/next_hand/doudizhu",
+                },
+                "game": {"type": "string", "description": "规则查询的游戏（rules 用）：poker/kards/guandan/doudizhu"},
+                "topic": {"type": "string", "description": "规则子主题（rules 用，Kards 支持）"},
+                "hand": {"type": "string", "description": "手牌，空格分隔，如 'As Kh'（evaluate 用）"},
+                "community": {"type": "string", "description": "公共牌（evaluate 用，可选）"},
+                "players": {"type": "string", "description": "玩家 JSON 数组（new_game/doudizhu 用）"},
+                "small_blind": {"type": "integer", "description": "小盲注（new_game 用）"},
+                "big_blind": {"type": "integer", "description": "大盲注（new_game 用）"},
+                "seed": {"type": "integer", "description": "随机种子（new_game/doudizhu 用）"},
+                "card_action": {"type": "string", "description": "德州行动 fold/check/call/raise（action 用）"},
+                "amount": {"type": "integer", "description": "加注/跟注金额（action 用）"},
+                "opponents": {"type": "integer", "description": "对手人数（odds 用）"},
+                "simulations": {"type": "integer", "description": "模拟次数（odds/suggest 用）"},
+                "rounds": {"type": "integer", "description": "对弈轮数（selfplay 用）"},
+                "cards": {"type": "string", "description": "斗地主出牌（doudizhu 用）"},
+                "score": {"type": "integer", "description": "斗地主叫分（doudizhu 用）"},
+            },
+        },
+        timeout=60.0,
+    )
+    async def entry_run(self, **kwargs):
+        params = kwargs.get("parameters") or {}
+        action = str(kwargs.get("action") or params.get("action") or "").strip().lower()
+
+        def _s(*names):
+            return str(kwargs.get(names[0]) or params.get(names[0]) or "").strip() if names else ""
+
+        def _i(name, default=0):
+            try:
+                return int(kwargs.get(name) or params.get(name) or default)
+            except (TypeError, ValueError):
+                return default
+
+        if action in ("rules", "rule"):
+            return await self.card_rules(game=_s("game"), topic=_s("topic"), parameters={})
+        if action in ("evaluate", "eval", "评估"):
+            return await self.card_evaluate(hand=_s("hand"), community=_s("community"), parameters={})
+        if action in ("new_game", "new", "开牌局"):
+            return await self.card_new_game(
+                players=_s("players"), small_blind=_i("small_blind", 10),
+                big_blind=_i("big_blind", 20), seed=_i("seed"), parameters={})
+        if action in ("action", "act"):
+            return await self.card_action(action=_s("card_action"), amount=_i("amount"), parameters={})
+        if action in ("state", "status", "局面"):
+            return await self.card_state()
+        if action in ("odds", "胜率"):
+            return await self.card_odds(opponents=_i("opponents", 1), simulations=_i("simulations", 2000), parameters={})
+        if action in ("suggest", "建议"):
+            return await self.card_suggest(simulations=_i("simulations", 1500), parameters={})
+        if action in ("selfplay", "对弈", "train"):
+            return await self.card_selfplay(game=_s("game") or "poker", rounds=_i("rounds", 1), parameters={})
+        if action in ("next_hand", "next", "换手"):
+            return await self.card_next_hand()
+        if action in ("doudizhu", "斗地主", "ddz"):
+            sub = str(params.get("sub_action") or _s("sub_action") or "").lower()
+            if sub in ("bid", "叫分"):
+                return await self.doudizhu_bid(score=_i("score"), parameters={})
+            if sub in ("play", "出牌"):
+                return await self.doudizhu_play(cards=_s("cards"), parameters={})
+            if sub in ("state", "局面"):
+                return await self.doudizhu_state()
+            if sub in ("identify", "识别"):
+                return await self.doudizhu_identify(cards=_s("cards"), parameters={})
+            return await self.doudizhu_new(players=_s("players"), seed=_i("seed"), parameters={})
+        return {
+            "output": "请指定操作：rules/evaluate/new_game/action/state/odds/suggest/selfplay/next_hand/doudizhu。",
+            "is_error": True,
+            "error": "NO_ACTION",
+        }
+
