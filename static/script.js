@@ -139,6 +139,13 @@ function cardEl(cardStr, extraClass = '') {
   suit.textContent = c.suit;
   el.appendChild(rank);
   el.appendChild(suit);
+  const cornerText = c.rank + c.suit;
+  for (const pos of ['tl', 'br']) {
+    const corner = document.createElement('span');
+    corner.className = `corner ${pos}`;
+    corner.textContent = cornerText;
+    el.appendChild(corner);
+  }
   return el;
 }
 
@@ -167,20 +174,53 @@ function renderState(state) {
   const stats = state.stats || { wins: 0, losses: 0 };
   $('stats').textContent = `胜 ${stats.wins} / 负 ${stats.losses}`;
 
+  /* 叫地主区域 */
+  const bid = state.bid_state || { bidding: false, current: -1, current_name: '', bid_history: [] };
+  const bidding = !!bid.bidding;
+  $('bid-area').classList.toggle('hidden', !bidding);
+  const ctrl = $('controls');
+  if (ctrl) ctrl.style.display = bidding ? 'none' : 'flex';
+  if (bidding) {
+    const logBox = $('bid-log');
+    clearChildren(logBox);
+    (bid.bid_history || []).forEach((h) => {
+      const span = document.createElement('span');
+      span.className = 'bid-item';
+      span.textContent = `${h.player}：${h.bid === 0 ? '不叫' : h.bid + '分'}`;
+      logBox.appendChild(span);
+    });
+    const myTurn = bid.current === 0;
+    [$('btn-bid0'), $('btn-bid1'), $('btn-bid2'), $('btn-bid3')].forEach((b) => { if (b) b.disabled = !myTurn; });
+  }
+
   /* 底牌 */
   const bottomBox = $('bottom-cards');
   clearChildren(bottomBox);
-  if (state.stage && state.stage !== 'none' && state.stage !== 'bidding') {
-    (state.bottom || []).forEach((c) => bottomBox.appendChild(miniEl(c)));
+  bottomBox.classList.remove('reveal');
+  if (state.stage && state.stage !== 'none') {
+    if (state.stage === 'bidding') {
+      for (let i = 0; i < 3; i += 1) {
+        const b = document.createElement('span');
+        b.className = 'mini back';
+        bottomBox.appendChild(b);
+      }
+    } else {
+      (state.bottom || []).forEach((c) => bottomBox.appendChild(miniEl(c)));
+    }
+    if (state.stage === 'playing') bottomBox.classList.add('reveal');
   }
 
   /* AI 面板 */
   const players = state.players || [];
   const left = players.find((p) => p.name === 'YUI_左') || { name: 'YUI_左', role: '', count: 0 };
   const right = players.find((p) => p.name === 'YUI_右') || { name: 'YUI_右', role: '', count: 0 };
-  $('ai-left-name').textContent = left.name + (left.role ? `（${left.role}）` : '');
+  $('ai-left-name').textContent = left.name;
+  $('ai-left-role').textContent = bidding ? '叫分中' : (left.role || '');
+  $('ai-left-role').className = 'ai-role' + (left.role === '地主' ? ' lord' : left.role === '农民' ? ' farmer' : '');
   $('ai-left-count').textContent = left.count;
-  $('ai-right-name').textContent = right.name + (right.role ? `（${right.role}）` : '');
+  $('ai-right-name').textContent = right.name;
+  $('ai-right-role').textContent = bidding ? '叫分中' : (right.role || '');
+  $('ai-right-role').className = 'ai-role' + (right.role === '地主' ? ' lord' : right.role === '农民' ? ' farmer' : '');
   $('ai-right-count').textContent = right.count;
 
   /* 玩家信息 */
@@ -208,6 +248,8 @@ function renderState(state) {
     hint.textContent = won ? '🎉 你赢了！' : `😔 你输了（${state.winner || ''}获胜）`;
   } else if (state.stage === 'none') {
     hint.textContent = '';
+  } else if (bidding) {
+    hint.textContent = bid.current === 0 ? '轮到你叫地主 👑' : `${bid.current_name} 思考叫分中…`;
   } else if (state.stage !== 'playing') {
     hint.textContent = '等待开始…';
   } else if (state.current === '你') {
@@ -281,6 +323,11 @@ $('btn-play').addEventListener('click', () => {
 
 $('btn-pass').addEventListener('click', () => runAction('dd_ui_pass', {}));
 $('btn-new').addEventListener('click', () => runAction('dd_ui_new_game', {}));
+
+$('btn-bid0').addEventListener('click', () => runAction('dd_ui_bid', { score: 0 }));
+$('btn-bid1').addEventListener('click', () => runAction('dd_ui_bid', { score: 1 }));
+$('btn-bid2').addEventListener('click', () => runAction('dd_ui_bid', { score: 2 }));
+$('btn-bid3').addEventListener('click', () => runAction('dd_ui_bid', { score: 3 }));
 
 /* 初始加载 */
 (async function init() {

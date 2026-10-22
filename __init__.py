@@ -32,6 +32,9 @@ from .doudizhu import (
     DouDizhuGame,
 )
 from .doudizhu import (
+    ai_bid as dd_ai_bid,
+)
+from .doudizhu import (
     card_str as dd_card_str,
 )
 from .doudizhu import (
@@ -1123,6 +1126,16 @@ class CardMasterPlugin(NekoPluginBase):
         "你"这一个玩家的牌，绝不要替 AI 出牌或替 AI 调用工具。
         """
         st = game.get_state()
+        if game.stage == "bidding":
+            lines = [
+                f"叫地主阶段：你的手牌（{st['players'][0]['card_count']}张）：{st['players'][0]['hand']}",
+                f"YUI_左 {st['players'][1]['card_count']}张 | YUI_右 {st['players'][2]['card_count']}张",
+            ]
+            if st["current_player"] == "你":
+                lines.append("轮到你先叫地主：用 dd_game_bid 叫分（0=不叫/1/2/3，叫3分直接当地主）。")
+            else:
+                lines.append(f"轮到 {st['current_player']} 叫分：用 dd_game_bid 提交你的叫分（0=不叫/1/2/3），AI 会自动依次叫。")
+            return lines
         lines = [
             f"你的身份：{st['players'][0]['role']} | 底牌：{st['bottom_cards']}",
             f"你的手牌（{st['players'][0]['card_count']}张）：{st['players'][0]['hand']}",
@@ -1142,46 +1155,51 @@ class CardMasterPlugin(NekoPluginBase):
 
     @llm_tool(
         name="dd_game_start",
-        description="开始一局内置斗地主小游戏：你和两个 YUI 人机对战。何时用：用户说'来一局斗地主''斗地主小游戏''打牌'等。参数 role：auto（随机分配身份，默认）/ landlord（我当地主）/ farmer（我当农民）。开局自动发牌分配身份并展示手牌，同时打开斗地主浏览器面板（客户端插件面板 → 斗地主，欢乐斗地主风格界面：显示你的手牌/底牌/AI手牌数/上一手，点击选牌后按'出牌'或'不要'，AI 自动出牌）。重要：两个 YUI_AI 的牌由插件自动出，你只负责出'你'这一个玩家的牌，绝不要替 AI 出牌。对话模式推进 AI 回合用 dd_game_advance，出牌用 dd_game_play，看局面用 dd_game_state。",
-        parameters={"type": "object", "properties": {
-            "role": {"type": "string", "description": "auto/landlord/farmer，默认 auto 随机分配"},
-        }, "required": []},
+        description="开始一局内置斗地主小游戏：你和两个 YUI 人机对战。何时用：用户说'来一局斗地主''斗地主小游戏''打牌'等。开局自动发牌进入叫地主阶段（不直接分配身份），用 dd_game_bid 叫分（0=不叫/1/2/3，叫3分直接当地主）；地主确定后自动进入出牌。同时打开斗地主浏览器面板（客户端插件面板 → 斗地主，欢乐斗地主风格界面：手牌/底牌/AI手牌数/上一手/叫地主按钮，点选牌出牌，AI 自动出牌）。重要：两个 YUI_AI 的牌由插件自动出，你只负责出'你'这一个玩家的牌，绝不要替 AI 出牌。对话模式：叫分用 dd_game_bid，推进 AI 回合用 dd_game_advance，出牌用 dd_game_play，看局面用 dd_game_state。",
+        parameters={"type": "object", "properties": {}, "required": []},
         timeout=30.0,
     )
     async def dd_game_start(self, *, role: str = "", **_):
-        prm = _.get("parameters") or {}
-        r = (role or prm.get("role", "auto")).strip().lower()
-        if r in ("地主", "landlord"):
-            r = "landlord"
-        elif r in ("农民", "farmer"):
-            r = "farmer"
-        else:
-            r = "auto"
-
+        # role 参数保留以兼容历史调用，但身份一律由叫地主阶段决定
         with self._lock:
-            g = DouDizhuGame(["你", "YUI_左", "YUI_右"])
-            if r == "landlord":
-                landlord_idx = 0
-            elif r == "farmer":
-                landlord_idx = 1
-            else:
-                landlord_idx = g.rng.randrange(3)
-            g._set_landlord(landlord_idx, 2)
+            g = DouDizhuGame(["你", "YUI_左", "YUI_右"])  # 发牌后自动进入 bidding（current=0 你先叫）
             self._dd_game = g
-            self._dd_stats["role"] = "landlord" if landlord_idx == 0 else "farmer"
+            self._dd_stats["role"] = "auto"
 
-            lines = [f"🃏 斗地主小游戏开始！你是{'地主' if landlord_idx == 0 else '农民'}。"]
-            lines.append("🌐 已打开斗地主浏览器面板（客户端插件面板 → 斗地主）：手牌、底牌、上一手都在里面，"
-                         "点击选牌出牌即可，AI 会自己出。你也可以继续用对话出牌（dd_game_play / dd_game_advance / dd_game_state）。")
-            if g.current != 0:
-                lines.append(f"地主是 {g.players[g.current]['name']}，"
-                             f"AI 先出牌（对话模式用 dd_game_advance 推进；面板里会自动进行）。")
+            lines = ["🃏 斗地主小游戏开始！发牌完成，进入叫地主阶段。"]
+            lines.append("🌐 已打开斗地主浏览器面板（客户端插件面板 → 斗地主）："
+                         "点叫地主按钮选分（不叫/1分/2分/3分），之后点击选牌出牌即可，AI 会自己出。"
+                         "你也可以继续用对话叫分（dd_game_bid / 面板里叫地主）。")
             state = g.get_state()
 
-        if g.stage == "over":
-            return {"output": "\n".join(lines), "is_error": False, "game_state": state}
         lines.extend(self._dd_build_view(g))
         return {"output": "\n".join(lines), "is_error": False, "game_state": state}
+
+    @llm_tool(
+        name="dd_game_bid",
+        description="在斗地主小游戏中叫地主。何时用：小游戏开局后需要叫分时（用户说'我当地主''不叫''叫2分'等）。参数 score：0=不叫，1/2/3=叫分（叫3分直接当地主）。用户叫完后 AI 自动依次叫分，地主确定后自动进入出牌阶段（面板同步更新）。注意：这是叫地主，不是出牌；出牌用 dd_game_play。",
+        parameters={"type": "object", "properties": {
+            "score": {"type": "integer", "description": "0=不叫，1/2/3=叫分"},
+        }, "required": ["score"]},
+        timeout=15.0,
+    )
+    async def dd_game_bid(self, *, score: int = 0, **_):
+        prm = _.get("parameters") or {}
+        s_raw = score if score != 0 else prm.get("score", 0)
+        try:
+            s = int(s_raw)
+        except (TypeError, ValueError):
+            s = 0
+        res = await self.dd_ui_bid(score=s)
+        out = {"output": res.get("output", ""), "is_error": res.get("is_error", False)}
+        with self._lock:
+            if self._dd_game is not None:
+                out["game_state"] = self._dd_game.get_state()
+            else:
+                out["game_state"] = None
+        if res.get("error"):
+            out["error"] = res["error"]
+        return out
 
     @llm_tool(
         name="dd_game_play",
@@ -1285,6 +1303,9 @@ class CardMasterPlugin(NekoPluginBase):
                 return {"output": "还没有牌局，请先用 dd_game_start 开一局。", "is_error": True, "error": "NO_GAME"}
             g = self._dd_game
             if g.stage != "playing":
+                if g.stage == "bidding":
+                    return {"output": "当前是叫地主阶段，请用 dd_game_bid 叫分（0=不叫/1/2/3）。",
+                            "is_error": False, "game_state": g.get_state()}
                 return {"output": "当前不在出牌阶段，无需推进。", "is_error": False, "game_state": g.get_state()}
             if g.current == 0:
                 return {"output": "已经轮到你出牌，直接用 dd_game_play 出牌即可。", "is_error": False, "game_state": g.get_state()}
@@ -1335,6 +1356,15 @@ class CardMasterPlugin(NekoPluginBase):
             "must_play": bool(game.stage == "playing" and not game.last_play and game.current == 0),
             "winner": winner,
             "stats": {"wins": self._dd_stats["wins"], "losses": self._dd_stats["losses"]},
+            "bid_state": {
+                "bidding": game.stage == "bidding",
+                "current": game.current,
+                "current_name": st["current_player"],
+                "bid_history": [
+                    {"player": h["player"], "bid": h["bid"]} for h in game._bid_history
+                ],
+                "max_bid": max((h["bid"] for h in game._bid_history), default=0),
+            },
         }
 
     @ui.context(id="dd_game")
@@ -1405,39 +1435,69 @@ class CardMasterPlugin(NekoPluginBase):
     @ui.action(id="dd_ui_new_game", label="开一局", icon="plus", order=0)
     @plugin_entry(
         id="dd_ui_new_game", name="斗地主开新局",
-        description="在浏览器面板里开始一局新的斗地主。可选 role：auto/landlord/farmer。",
+        description="在浏览器面板里开始一局新的斗地主。发牌后进入叫地主阶段（不直接分配身份）。",
         kind="action",
-        input_schema={"type": "object", "properties": {
-            "role": {"type": "string", "description": "auto（随机）/ landlord（当地主）/ farmer（当农民）"},
-        }},
+        input_schema={"type": "object", "properties": {}},
     )
     async def dd_ui_new_game(self, **_):
-        src = self._ui_kwargs(_)
-        r = str(src.get("role") or "auto").strip().lower()
-        if r in ("地主", "landlord"):
-            r = "landlord"
-        elif r in ("农民", "farmer"):
-            r = "farmer"
-        else:
-            r = "auto"
         with self._lock:
-            g = DouDizhuGame(["你", "YUI_左", "YUI_右"])
-            if r == "landlord":
-                landlord_idx = 0
-            elif r == "farmer":
-                landlord_idx = 1
-            else:
-                landlord_idx = g.rng.randrange(3)
-            g._set_landlord(landlord_idx, 2)
+            g = DouDizhuGame(["你", "YUI_左", "YUI_右"])  # 发牌后自动进入 bidding（current=0 你先叫）
             self._dd_game = g
-            self._dd_stats["role"] = "landlord" if landlord_idx == 0 else "farmer"
-            lines = [f"🃏 新一局开始！你是{'地主' if landlord_idx == 0 else '农民'}。"]
+            self._dd_stats["role"] = "auto"  # 身份由叫地主结果决定
+            lines = ["🃏 新一局开始！发牌完成，进入叫地主阶段。",
+                     "轮到你先叫地主：不叫 / 叫1分 / 叫2分 / 叫3分（叫3分直接当地主）。"]
+            state = self._dd_ui_state(g)
+        return {"output": "\n".join(lines), "is_error": False, "state": state}
+
+    @ui.action(id="dd_ui_bid", label="叫地主", icon="flag", order=1, refresh_context=True)
+    @plugin_entry(
+        id="dd_ui_bid", name="斗地主叫地主",
+        description="在浏览器面板里叫地主。参数 score：0=不叫，1/2/3=叫分（叫3分直接当地主）。叫分后 AI 自动依次叫分，地主确定后自动进入出牌阶段。",
+        kind="action",
+        input_schema={"type": "object", "properties": {
+            "score": {"type": "integer", "description": "0=不叫，1/2/3=叫分"},
+        }},
+    )
+    async def dd_ui_bid(self, **_):
+        src = self._ui_kwargs(_)
+        try:
+            score = int(src.get("score", 0))
+        except (TypeError, ValueError):
+            score = 0
+        if score not in (0, 1, 2, 3):
+            return {"output": "叫分必须是 0(不叫)/1/2/3。", "is_error": True,
+                    "error": "INVALID_SCORE", "state": self._dd_ui_state(self._dd_game)
+                    if self._dd_game else {"stage": "none"}}
+        with self._lock:
+            if self._dd_game is None:
+                return {"output": "还没有牌局，请先开一局。", "is_error": True, "error": "NO_GAME",
+                        "state": {"stage": "none"}}
+            g = self._dd_game
+            if g.stage != "bidding":
+                return {"output": "当前不是叫地主阶段，请重新开局。", "is_error": True,
+                        "error": "BAD_STAGE", "state": self._dd_ui_state(g)}
             if g.current != 0:
-                moves, final = self._dd_run_to_user(g)
-                lines.extend(f"  {m}" for m in moves)
-                if final:
-                    self._dd_update_stats(final)
-                    lines.append(f"\n🏁 {final['winner']}（{final['role']}）出完牌获胜！")
+                return {"output": f"当前轮到 {g.players[g.current]['name']}（AI）叫分。",
+                        "is_error": False, "state": self._dd_ui_state(g)}
+            res = g.bid(0, score)
+            lines = [res["message"]]
+            if res.get("ok"):
+                # AI 依次叫到结束或轮回到用户
+                guard = 0
+                while g.stage == "bidding" and g.current != 0 and guard < 60:
+                    guard += 1
+                    ai_idx = g.current
+                    ai_score = dd_ai_bid(g.players[ai_idx]["hand"])
+                    r2 = g.bid(ai_idx, ai_score)
+                    lines.append(r2["message"])
+                    if r2.get("result"):
+                        break
+                if g.stage == "bidding" and g.current == 0:
+                    max_bid = max((h["bid"] for h in g._bid_history), default=0)
+                    lines.append(f"轮到你继续叫分（当前最高 {max_bid} 分）：不叫 / 1分 / 2分 / 3分。")
+                elif g.stage == "playing":
+                    lines.append(f"🏠 地主是 {g.players[g.landlord_idx]['name']}，"
+                                 f"{g.players[g.landlord_idx]['name']} 先出牌。")
             state = self._dd_ui_state(g)
         return {"output": "\n".join(lines), "is_error": False, "state": state}
 

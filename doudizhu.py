@@ -313,6 +313,41 @@ def _dedup_candidates(cands: list[dict]) -> list[dict]:
     return out
 
 
+def ai_bid(hand: list[int]) -> int:
+    """AI 叫地主：按手牌强度决定叫分（0=不叫，1/2/3=叫分）。
+
+    强度分 = 大王2.0 + 小王1.5 + 每个2计1.0 + 每个A计0.5 + 每个炸弹2.0。
+    >=6 叫3分（直接当地主），>=4 叫2分，>=2 叫1分，否则不叫。
+    """
+    counter = Counter(card_rank(c) for c in hand)
+    score = 0.0
+    score += counter.get(17, 0) * 2.0   # 大王
+    score += counter.get(16, 0) * 1.5   # 小王
+    score += counter.get(15, 0) * 1.0   # 2
+    score += counter.get(14, 0) * 0.5   # A
+    for r, cnt in counter.items():
+        if cnt >= 4 and r < 16:
+            score += 2.0                # 炸弹
+    if score >= 6.0:
+        return 3
+    if score >= 4.0:
+        return 2
+    if score >= 2.0:
+        return 1
+    return 0
+
+
+# 先手出牌优先级：组合牌型优先（一次清多张），单张最后兜底
+_LEAD_PRIORITY = {
+    "airplane_pair": 0, "airplane_single": 0, "airplane": 0,
+    "pair_straight": 0, "straight": 0,
+    "triple_pair": 1, "triple_single": 1,
+    "pair": 2,
+    "triple": 3,
+    "single": 4,
+}
+
+
 def suggest_play(hand: list[int], last_play: list[int] | None,
                  role: str = "farmer", top_k: int = 8) -> dict:
     """实时出牌建议：枚举手中全部可出候选，按策略排序，给出推荐。
@@ -387,12 +422,18 @@ def suggest_play(hand: list[int], last_play: list[int] | None,
             else:
                 reason = f"用{HAND_TYPE_NAMES.get(ranked[0]['type'], ranked[0]['type'])}（{hand_str(ranked[0]['cards'])}）压制上一手。"
     else:
-        # 先手
+        # 先手：优先出组合清牌（顺子/连对/飞机/三带/对子），单张留到最后兜底
         non_bomb = [c for c in ranked if c["type"] not in ("bomb", "rocket")]
         if non_bomb:
-            suggestion = non_bomb[0]
-            reason = (f"先手出最弱的{HAND_TYPE_NAMES.get(non_bomb[0]['type'], non_bomb[0]['type'])}"
-                      f"（{hand_str(non_bomb[0]['cards'])}）试探，保留炸弹/王炸。")
+            lead_sorted = sorted(non_bomb, key=lambda c: (
+                _LEAD_PRIORITY.get(c["type"], 50),
+                -len(c["cards"]),
+                c["main_rank"],
+            ))
+            suggestion = lead_sorted[0]
+            reason = (f"先手出{len(suggestion['cards'])}张的"
+                      f"{HAND_TYPE_NAMES.get(suggestion['type'], suggestion['type'])}"
+                      f"（{hand_str(suggestion['cards'])}）清牌，单张/大牌留后面。")
         else:
             suggestion = ranked[0]
             reason = f"手中只剩炸弹/王炸，直接打出：{hand_str(ranked[0]['cards'])}。"
