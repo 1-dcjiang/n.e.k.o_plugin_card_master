@@ -27,6 +27,7 @@ from plugin.sdk.plugin import (
 )
 
 from . import kards as kards_mod
+from . import kards_ai as kards_ai_mod
 from . import live as live_mod
 from .doudizhu import (
     DouDizhuGame,
@@ -1086,6 +1087,86 @@ class CardMasterPlugin(NekoPluginBase):
             return {"output": f"无法给出建议：{result.get('error')}\n下一步：{result.get('action')}",
                     "is_error": True, "error": "ADVICE_FAILED"}
         return {"output": result.get("output", ""), "is_error": False, "detail": result}
+
+    @llm_tool(
+        name="kards_auto_play",
+        description="Kards 自动对局执行（读局面→决策→真实操作）。何时用：Kards 游戏窗口已打开且在对局中，YUI 要自己打牌时调用本工具，插件会自动：定位并前置窗口→识别局面（指挥点/总部/手牌/战线）→基于官方规则给出行动建议→执行（优先 KARDS_API 内存通道：读真数据+纯代码 play_card/attack/end_turn，不碰鼠标；未装则回退读屏+键鼠：拖拽出牌/点选攻击/点结束回合）→等待对手回合→继续。参数 turns：本轮执行几个己方回合（默认1，最大5）。每回合执行前都会真实截图/读内存验证，识别不到就停止如实汇报（绝不盲点）。返回每回合执行日志（操作了什么）、跳过的动作及原因、识别说明、所用通道。注意：需玩家已进入一局对局（主菜单/组牌界面会报 GAME_NOT_RUNNING 之外的识别提示）。",
+        parameters={"type": "object", "properties": {
+            "turns": {"type": "integer", "description": "执行几个己方回合，默认1，最大5"},
+        }, "required": []},
+        timeout=180.0,
+    )
+    async def kards_auto_play(self, *, turns: int = 1, **_):
+        try:
+            turns = max(1, min(int(turns or 1), 5))
+        except (TypeError, ValueError):
+            turns = 1
+        try:
+            win = kards_ai_mod.find_kards_window()
+            result = kards_ai_mod.run_game(win, max_turns=turns, max_actions_per_turn=4,
+                                           poll_seconds=3.0)
+        except kards_ai_mod.KardsError as e:
+            return {"output": f"无法开始自动对局：{e}\n下一步：启动 Kards 并进入一局对局后重试。",
+                    "is_error": True, "error": e.code}
+        lines = []
+        for t in result.get("turns", []):
+            lines.append(f"**第 {t['turn']} 回合**（指挥点 {t['state'].get('kredits')}，"
+                         f"我方 {t['state'].get('my_hq')} / 敌方 {t['state'].get('opp_hq')}）")
+            if t["executed"]:
+                lines.append(f"  已执行：{'；'.join(t['executed'])}")
+            if t["skipped"]:
+                lines.append(f"  跳过（不盲点）：{'；'.join(t['skipped'])}")
+            lines.append(f"  说明：{t['summary']}")
+        if result.get("notes"):
+            lines.append(f"识别提示：{'；'.join(result['notes'])}")
+        lines.append(f"停止原因：{result.get('stopped') or '正常完成'}"
+                     f"（通道：{'KARDS_API 内存读取' if result.get('mode') == 'api' else '读屏+键鼠'}）")
+        return {"output": "\n".join(lines), "is_error": False,
+                "detail": {"stopped": result.get("stopped"), "turns": len(result.get("turns", [])),
+                           "mode": result.get("mode")}}
+
+    @llm_tool(
+        name="kards_auto_status",
+        description="Kards 当前局面识别（只读，不点击）。何时用：Kards 对局中想确认 AI 当前看到什么（指挥点/双方总部/手牌数/战线占用/是否自己回合），或自动对局卡住时诊断。返回画面识别结果与识别说明；未标定数字模板时相关数值为未识别（需要先跑 kards_calibrate）。",
+        parameters={"type": "object", "properties": {}, "required": []},
+        timeout=60.0,
+    )
+    async def kards_auto_status(self, *, dummy: int = 0, **_):
+        try:
+            win = kards_ai_mod.find_kards_window()
+            kards_ai_mod._front_window(win)
+            frame = kards_ai_mod.capture_window(win)
+            win_w = win["right"] - win["left"]
+            win_h = win["bottom"] - win["top"]
+            st = kards_ai_mod.vision(frame, win_w, win_h)
+        except kards_ai_mod.KardsError as e:
+            return {"output": f"无法识别局面：{e}", "is_error": True, "error": e.code}
+        lines = [f"指挥点 {st['kredits']} | 我方总部 {st['my_hq']} | 敌方总部 {st['opp_hq']}",
+                 f"手牌 {len(st['my_hand'])} 张 | 前线占用 {len(st['front_line'])} | "
+                 f"己方支援线占用 {len(st['support_line'])} | 敌方支援线占用 {len(st['opp_support'])}",
+                 f"是否我方回合：{'是' if st['is_my_turn'] else '否'}"]
+        if st["vision_note"]:
+            lines.append("识别提示：" + "；".join(st["vision_note"]))
+        lines.append("说明：数值显示「未识别」说明数字模板未标定，先运行 kards_calibrate 完成标定后自动对局才能读准。")
+        return {"output": "\n".join(lines), "is_error": False, "detail": st}
+
+    @llm_tool(
+        name="kards_calibrate",
+        description="Kards 画面标定（截图存档，不点击）。何时用：首次使用自动对局前、或分辨率/窗口缩放变化后。本工具会定位并前置 Kards 窗口，把当前画面及关键区域（指挥点/双方总部/结束回合按钮/手牌行）裁剪保存到插件 templates/kards/ 目录，供人工/后续标定数字模板与校准布局坐标。返回保存的文件清单与当前窗口尺寸。注意：请在游戏处于「对局中且轮到你」的画面调用（不要在加载/结算界面）。",
+        parameters={"type": "object", "properties": {}, "required": []},
+        timeout=60.0,
+    )
+    async def kards_calibrate(self, *, dummy: int = 0, **_):
+        try:
+            win = kards_ai_mod.find_kards_window()
+            out = kards_ai_mod.calibrate_capture(win)
+        except kards_ai_mod.KardsError as e:
+            return {"output": f"无法标定：{e}", "is_error": True, "error": e.code}
+        lines = [f"已保存 {len(out['saved'])} 个文件到插件 templates/kards/：{', '.join(out['saved'])}",
+                 f"窗口尺寸 {out['win']['w']}×{out['win']['h']}",
+                 "下一步：从裁剪图中把单个数字裁成 digit_0.png..digit_9.png 放入同目录即完成数字标定；"
+                 "布局坐标如需调整见 kards_layout.json（kards_calibrate 会生成）。"]
+        return {"output": "\n".join(lines), "is_error": False, "detail": out}
 
     # ══════════ 内置斗地主小游戏（对话内文字交互，无需鼠标权限） ══════════
 

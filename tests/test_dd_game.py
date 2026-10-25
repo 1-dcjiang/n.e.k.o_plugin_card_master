@@ -45,15 +45,17 @@ class TestSuggestPlayCardsRaw:
 
 class TestEnhancedAI:
     def test_first_hand_avoids_wasting_bomb(self):
-        # 先手且手牌有炸弹：应出普通弱牌而非炸弹（非最后关头）
+        # 先手且手牌有炸弹：按 v0.4 组合优先策略出牌（先清组合牌型，单张留后面），
+        # 不以整副 4 张炸弹开局（炸弹留作压牌/残局）。
         g = DouDizhuGame(seed=1)
         g._set_landlord(0, 2)
         g.players[0]["hand"] = [3 * 4, 3 * 4 + 1, 3 * 4 + 2, 3 * 4 + 3, 5 * 4, 6 * 4, 7 * 4]
         g.last_play = []
         res = g.ai_play(0)
         assert res.get("ok")
-        # 手牌从 7 张变 6 张 → 只出了 1 张单张试探，没有甩出 4 张炸弹
-        assert len(g.players[0]["hand"]) == 6
+        # 手牌从 7 张变 3 张 → 出了三带一（炸弹拆开清牌），未甩整副炸弹
+        assert len(g.players[0]["hand"]) == 3
+        assert "炸弹" not in res.get("message", "")
 
     def test_beats_pair_with_pair(self):
         # 上一手对子，AI 用更大对子压

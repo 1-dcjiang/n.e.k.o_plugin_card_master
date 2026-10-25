@@ -145,7 +145,8 @@ def test_ui_new_game_returns_state():
     out = _run(inst.dd_ui_new_game())
     assert "state" in out
     st = out["state"]
-    assert st["stage"] in ("playing", "over")
+    # 新开一局从叫地主阶段开始（v0.6.0 面板流程：bidding → playing → over）
+    assert st["stage"] in ("bidding", "playing", "over")
     if st["stage"] == "playing":
         assert st["current"] == "你"
     assert st["stats"] == {"wins": 0, "losses": 0}

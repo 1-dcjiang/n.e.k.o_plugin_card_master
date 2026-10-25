@@ -254,6 +254,13 @@ def advise_kards(state: dict) -> dict:
         except (TypeError, ValueError):
             return 0
 
+    def card_cost(c: dict):
+        """卡牌费用；None=未识别（不按可部署/可使用处理，宁缺勿猜）。"""
+        try:
+            return int(c.get("cost"))
+        except (TypeError, ValueError):
+            return None
+
     if not is_my_turn:
         return {
             "ok": True,
@@ -291,9 +298,9 @@ def advise_kards(state: dict) -> dict:
                 })
             reasons.append("敌方前线有单位：优先消灭攻击力高的单位（攻击>防御的优先）。")
 
-    # ── 2. 部署阶段：用剩余指挥点部署单位 ──
-    deployable = [c for c in my_hand if c.get("type") in ("unit", "单位") and
-                  int(c.get("cost", 99)) <= kredits]
+    # ── 2. 部署阶段：用剩余指挥点部署单位（费用未识别的不盲目部署） ──
+    deployable = [c for c in my_hand if c.get("type") in ("unit", "单位")
+                  and card_cost(c) is not None and card_cost(c) <= kredits]
     if deployable:
         # 优先部署高战力单位；有闪击的单位可立即行动
         deployable_sorted = sorted(deployable, key=lambda c: -int(c.get("cost", 0)))
@@ -315,9 +322,9 @@ def advise_kards(state: dict) -> dict:
         else:
             reasons.append("部署的单位本回合召唤眩晕（除非「闪击」），用于防守/为下回合准备。")
 
-    # ── 3. 命令卡：有盈余指挥点且手牌有 order 时使用 ──
-    orders = [c for c in my_hand if c.get("type") in ("order", "指令", "反制指令") and
-              int(c.get("cost", 99)) <= kredits]
+    # ── 3. 命令卡：有盈余指挥点且手牌有 order 时使用（费用未识别的不盲目使用） ──
+    orders = [c for c in my_hand if c.get("type") in ("order", "指令", "反制指令")
+              and card_cost(c) is not None and card_cost(c) <= kredits]
     if orders:
         cheap = sorted(orders, key=lambda c: int(c.get("cost", 0)))
         c0 = cheap[0]

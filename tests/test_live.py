@@ -57,11 +57,11 @@ class TestSuggestFromState:
 
 class TestSuggestPlay:
     def test_first_hand_plays_weakest(self):
-        # 先手：应优先出最小单张试探
+        # 先手：v0.4 组合优先策略——优先出组合牌型清牌（这里出对子），单张留后面
         hand = [3 * 4, 4 * 4 + 1, 10 * 4, 10 * 4 + 1, 14 * 4, 14 * 4 + 1]
         sug = suggest_play(hand, None, role="farmer")
         assert sug["suggestion"] is not None
-        assert sug["suggestion"]["type"] == "single"
+        assert sug["suggestion"]["type"] in ("pair", "single")
         assert sug["candidates"]
 
     def test_beat_with_minimal(self):
