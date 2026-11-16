@@ -12,7 +12,7 @@ description = """
 """
 short_description = "让 YUI 自主学习打牌：规则查询、牌型评估、胜率计算、出牌建议、自我对弈、内置斗地主小游戏；Kards 自动对局（读屏/读内存真局面→真实操作打完整局，不瞎点不挂机）"
 keywords = ["扑克", "poker", "卡牌", "掼蛋", "kards", "德州扑克", "打牌", "训练", "self-play", "card game", "live", "实时打牌", "斗地主", "小游戏", "doudizhu", "游戏", "浏览器面板", "hosted-ui", "胜率", "牌型", "出牌建议", "规则", "叫地主", "叫分", "抢地主", "自动对局", "auto play", "读屏", "OCR", "KARDS_API", "内存读取", "键鼠", "回合循环", "不瞎点"]
-version = "0.6.0"
+version = "0.6.1"
 type = "plugin"
 entry = "plugin.plugins.card_master:CardMasterPlugin"
 
